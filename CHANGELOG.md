@@ -29,8 +29,13 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   period: a usage question, a `turn_input`, an `mcp_request` or upstream sign-in step asked during the
   drop is held and sent after the bridge's next `hello`; a usage question or `turn_input` already out is
   sent again (a bridge takes a `message_id` once); a file hand-over in progress carries on (its bytes
-  have their own connection) and its frames due during the drop are held. Each step's timeout starts
-  when its frame is written. When the grace period ends without the machine they fail as before, a
+  have their own connection) and its frames due during the drop are held. A held item never outlives
+  its caller: a usage question, `turn_input` or exchange is held only until its own timeout, counted
+  from the request (each caller waits that plus 3 s); when it passes the frame is dropped, never sent
+  later, and the caller is answered as before the hold (usage 404 `bridge_not_connected`, an exchange
+  404 `not_connected`, a `turn_input` `send_failed`, or `no_answer` if it went out before the drop).
+  Two identical exchanges share one frame, each with its own clock. A file hand-over's clocks
+  (pickup, answer, upload confirm) start when its frame is written. When the grace period ends without the machine they fail as before, a
   `turn_input` with the new reason **`connection_lost`** (its turn ended too; do not count the message
   as delivered). An `mcp_request` or sign-in step already out still fails at once: it may have run.
 - A turn lost after a drop says why in its `bridge_disconnected` message: the machine came back
@@ -45,7 +50,7 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 - `BridgeConnectionManager::isDetached()`, `detachedRequestIdsForUser()`, `reattachRunningTurns()`,
   `expireDetachedRequests()`, `acceptSeq()` / `commitSeq()`, `isAwaitingReconnect()`, `canReach()`,
   `reachableBridgeInfo()`, `reachableBridgeSupports()`, `sendOrHold()`, `flushHeldFrames()`,
-  `lostAfterDropMessage()`, `MessageTypes::STREAM_ACK`.
+  `isHeldFrame()`, `dropHeldFrame()`, `lostAfterDropMessage()`, `MessageTypes::STREAM_ACK`.
 
 ### Unchanged
 

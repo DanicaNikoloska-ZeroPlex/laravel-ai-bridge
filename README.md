@@ -1390,10 +1390,13 @@ are buffered and replay by index (`onUserInput`, `onMainState` on a
 
 When a bridge with `reliable_delivery` drops for a moment, a `sendTurnInput()`
 (and a usage question, an upstream sign-in step or a file hand-over) waits for
-it to reconnect instead of failing. If it does not come back within
-`websocket.reconnect_grace_seconds`, the message is answered `connection_lost`:
-the turn has ended too, so keep the message for the next turn rather than count
-it as delivered. See `PROTOCOL.md`, "Short drops".
+it to reconnect instead of failing, but never longer than its own timeout
+(`server.turn_input_timeout` for a message, counted from the call): a message
+still held then is dropped, never sent later, and answered `send_failed`. If the
+machine does not come back within `websocket.reconnect_grace_seconds`, the
+message is answered `connection_lost`: the turn has ended too. Either way, keep
+the message for the next turn rather than count it as delivered. See
+`PROTOCOL.md`, "Short drops".
 
 A bridge may close a turn's input before the turn ends (ai-bridge 0.25+,
 capability `input_closed`): the stream then carries `input_closed`

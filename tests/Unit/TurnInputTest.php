@@ -428,7 +428,7 @@ function reconnectWithTurn(object $rig): void
     $rig->manager->flushHeldFrames('user-1');
 }
 
-it('holds a message sent during a short drop and sends it after the reconnect, with a fresh clock (#14256)', function () {
+it('holds a message sent during a short drop and sends it after the reconnect while its caller still waits (#14256)', function () {
     $rig = reliableInputRig(0.05);
     $rig->manager->removeConnection('user-1', 'websocket_closed');
 
@@ -445,13 +445,11 @@ it('holds a message sent during a short drop and sends it after the reconnect, w
         ->and($out->responses)->toBe([['status' => 200, 'body' => ['status' => 'accepted']]]);
 });
 
-it('does not answer no_answer for a message out when the machine drops; it is sent again after the reconnect (#14274)', function () {
-    $rig = reliableInputRig(0.05);
+it('sends a message that was out when the machine dropped again after the reconnect, while its caller still waits (#14274)', function () {
+    $rig = reliableInputRig();
     $out = postInput($rig, INPUT_BODY);
 
     $rig->manager->removeConnection('user-1', 'websocket_closed');
-    // Its clock runs out while the machine is away: that does not answer it.
-    $rig->loop->run();
     expect($out->responses)->toBe([]);
 
     $rig->answer = fn () => ackFrom($rig, 'conn-1b', ['status' => 'accepted']);
@@ -460,6 +458,32 @@ it('does not answer no_answer for a message out when the machine drops; it is se
     expect($rig->sent)->toHaveCount(2)
         ->and($rig->sent[1])->toBe($rig->sent[0])
         ->and($out->responses)->toBe([['status' => 200, 'body' => ['status' => 'accepted']]]);
+});
+
+it('drops a message held past its caller\'s timeout and answers send_failed; it is never sent after the reconnect (#14334)', function () {
+    $rig = reliableInputRig(0.05);
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $out = postInput($rig, INPUT_BODY);
+
+    // The clock runs from the request, not from the reconnect.
+    $rig->loop->run();
+    expect($out->responses)->toBe([['status' => 200, 'body' => ['status' => 'rejected', 'reason' => 'send_failed']]])
+        ->and($rig->manager->hasPendingTurnInput('req-1', 'msg-1'))->toBeFalse();
+
+    reconnectWithTurn($rig);
+    expect($rig->sent)->toBe([]);
+});
+
+it('answers no_answer for a message out when the machine drops and its caller\'s timeout passes; it is not sent again (#14334)', function () {
+    $rig = reliableInputRig(0.05);
+    $out = postInput($rig, INPUT_BODY);
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+
+    $rig->loop->run();
+    expect($out->responses)->toBe([['status' => 200, 'body' => ['status' => 'rejected', 'reason' => 'no_answer']]]);
+
+    reconnectWithTurn($rig);
+    expect($rig->sent)->toHaveCount(1);
 });
 
 it('answers connection_lost when the machine does not come back within the grace period', function () {
@@ -500,6 +524,35 @@ it('holds a usage question asked during a short drop and answers it after the re
 
     $rig->manager->resolvePendingUsage($usage['id'], 'user-1', ['ok' => true, 'windows' => []]);
     expect($out->responses)->toBe([['status' => 200, 'body' => ['ok' => true, 'windows' => []]]]);
+});
+
+it('drops a usage question held past its caller\'s timeout and answers bridge_not_connected; it is never sent after the reconnect (#14334)', function () {
+    config()->set('ai-bridge.server.usage_timeout', 0.05);
+    $rig = reliableInputRig();
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+
+    $out = new stdClass();
+    $out->responses = [];
+    $tcp = Mockery::mock(ConnectionInterface::class);
+    $tcp->shouldReceive('write')->andReturnUsing(function (string $raw) use ($out) {
+        [$head, $json] = explode("\r\n\r\n", $raw, 2);
+        preg_match('#^HTTP/1\.1 (\d+)#', $head, $m);
+        $out->responses[] = ['status' => (int) $m[1], 'body' => json_decode($json, true)];
+
+        return true;
+    });
+    $tcp->shouldReceive('end');
+    $token = app(TokenManager::class)->generate('user-1', ['scope' => TokenManager::INTERNAL_RELAY_SCOPE], 60);
+    (new ReflectionMethod(BridgeWebSocketServer::class, 'handleHttpRequest'))
+        ->invoke($rig->server, $tcp, new PsrRequest('GET', '/api/usage', ['Authorization' => "Bearer {$token}"]));
+
+    $rig->loop->run();
+    expect($out->responses)->toHaveCount(1)
+        ->and($out->responses[0]['status'])->toBe(404)
+        ->and($out->responses[0]['body']['error'])->toBe('bridge_not_connected');
+
+    reconnectWithTurn($rig);
+    expect($rig->sent)->toBe([]);
 });
 
 it('the one-second tick sends owed receipts, and fails detached turns past the grace period (#14262)', function () {

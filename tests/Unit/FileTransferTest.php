@@ -617,3 +617,22 @@ it('ends the transfers of a machine that does not come back within the grace per
 
     expect($worker->json()['code'])->toBe('machine_gone')->and($rig->hub->inFlight())->toBe(0);
 });
+
+it('starts the upload confirm clock when upload_sent is written after the reconnect, not while it is held (#14335)', function () {
+    $rig = reliableTransferRig();
+    $worker = startUpload($rig, 3);
+    $id = frame($rig, MessageTypes::UPLOAD_OFFER)['id'];
+    machineGets($rig, $id);
+    $uploads = new ReflectionProperty(TransferHub::class, 'uploads');
+
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $worker->emit('data', ['abc']);
+
+    expect(frame($rig, MessageTypes::UPLOAD_SENT))->toBeNull()
+        ->and($uploads->getValue($rig->hub)[$id]['timer'])->toBeNull();
+
+    reconnectMachine($rig);
+
+    expect(frame($rig, MessageTypes::UPLOAD_SENT)['id'])->toBe($id)
+        ->and($uploads->getValue($rig->hub)[$id]['timer'])->not->toBeNull();
+});

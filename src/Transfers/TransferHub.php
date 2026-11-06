@@ -286,16 +286,34 @@ final class TransferHub
         $u['bridge']->end();
 
         // Held through a short drop: the bytes went on their own connection, and the machine
-        // still needs this to check and keep them.
-        $this->connections->sendOrHold($u['user_id'], [
+        // still needs this to check and keep them. The confirm clock starts when it is written
+        // (at once, or after the reconnect); no clock runs while it is held, the grace period
+        // bounding that wait.
+        $armConfirm = function () use ($id): void {
+            if (($this->uploads[$id]['phase'] ?? null) === 'sent') {
+                $this->arm($id, 'upload', self::CONFIRM_SECONDS, 504, 'not_confirmed',
+                    'The machine received the file but never confirmed it was saved.');
+            }
+        };
+
+        $this->disarm($id);
+
+        $sent = $this->connections->sendOrHold($u['user_id'], [
             'type' => MessageTypes::UPLOAD_SENT,
             'id' => $id,
             'size' => $u['passed'],
             'sha256' => $sha256,
-        ]);
+        ], $armConfirm, self::uploadSentHoldKey($id));
 
-        $this->arm($id, 'upload', self::CONFIRM_SECONDS, 504, 'not_confirmed',
-            'The machine received the file but never confirmed it was saved.');
+        if (! $sent) {
+            $armConfirm();
+        }
+    }
+
+    /** The key an upload_sent is held under while its machine is away (see sendOrHold()). */
+    private static function uploadSentHoldKey(string $id): string
+    {
+        return 'upload_sent:'.$id;
     }
 
     /** The machine came for the bytes. */
@@ -418,6 +436,8 @@ final class TransferHub
             return;
         }
         $this->forgetUpload($id);
+        // Never written later for an upload that has already failed.
+        $this->connections->dropHeldFrame($u['user_id'], self::uploadSentHoldKey($id));
 
         BridgeLog::info('upload not completed', ['id' => $id, 'code' => $code, 'passed' => $u['passed'], 'size' => $u['size']]);
 
@@ -818,6 +838,16 @@ final class TransferHub
                 }
             }
         });
+    }
+
+    /** Stop an upload's timer without arming another. */
+    private function disarm(string $id): void
+    {
+        $timer = $this->uploads[$id]['timer'] ?? null;
+        if ($timer instanceof TimerInterface) {
+            $this->loop->cancelTimer($timer);
+        }
+        $this->uploads[$id]['timer'] = null;
     }
 
     /** (Re)arm the one timer a transfer has; when it fires, the transfer fails. */

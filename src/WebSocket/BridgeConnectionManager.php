@@ -339,9 +339,10 @@ class BridgeConnectionManager
      * Send a frame to a user's machine now, or, while its `reliable_delivery` bridge is away
      * on a short drop, hold it and send it after the bridge's next hello.
      *
-     * `$onSent` runs once the frame is written (at once, or after the reconnect): that is
-     * where a caller starts the clock on the answer, so the wait for the reconnect does not
-     * count against it. A frame still held when the grace period ends is dropped; whoever
+     * `$onSent` runs once the frame is written (at once, or after the reconnect). A caller
+     * that holds an HTTP request open for the answer starts its clock at the request instead,
+     * and drops the frame with dropHeldFrame() when that clock ends while it is still held
+     * (PROTOCOL.md, "Short drops"). A frame still held when the grace period ends is dropped; whoever
      * waits on its answer is failed then by its own registry (usage, turn input, exchange) or
      * by the user-gone listeners (transfers).
      *
@@ -424,6 +425,27 @@ class BridgeConnectionManager
         }
 
         return $sent;
+    }
+
+    /** Whether a frame is held under `$key` for this user's machine (see sendOrHold()). */
+    public function isHeldFrame(int|string $userId, string $key): bool
+    {
+        return isset($this->heldFrames[(string) $userId][$key]);
+    }
+
+    /**
+     * Drop a frame held under `$key` because its caller has given up (its own timeout passed,
+     * measured from its request): a held item never outlives its caller, so it is never sent
+     * after the caller was told it was not delivered.
+     *
+     * @return bool  True when the frame was still held (never written since the drop).
+     */
+    public function dropHeldFrame(int|string $userId, string $key): bool
+    {
+        $held = $this->isHeldFrame($userId, $key);
+        $this->forgetHeldFrame((string) $userId, $key);
+
+        return $held;
     }
 
     /** Forget a held frame whose waiter has been answered or has given up. */
