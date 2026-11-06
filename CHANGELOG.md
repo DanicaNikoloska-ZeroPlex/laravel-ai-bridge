@@ -3,6 +3,31 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [Unreleased]
+
+### Added
+
+- **A reply survives a short drop (D09710, PROTOCOL.md "Short drops").** A bridge that sends
+  `capabilities.reliable_delivery: true` in `hello` numbers its `stream` frames (`seq`, 1.. per
+  `request_id`, final frame included). The server stores a frame only when its `seq` is one more
+  than the last stored for that turn, drops re-sends (and confirms them again), and does not store
+  a frame after a gap. What is stored is confirmed with `{"type": "stream_ack", "request_id", "seq"}`
+  (cumulative), at least every second while frames arrive (`websocket.stream_ack_interval`) and at
+  once for the final frame.
+- When such a bridge drops, its pending turns are **detached instead of failed** for
+  `websocket.reconnect_grace_seconds` (default 120, sent as `welcome.config.reconnect_grace_seconds`).
+  The next `hello` re-attaches the turns it lists in `running_turns`; a detached turn it does not list,
+  or one still detached when the period ends, fails with `bridge_disconnected` and fires the new
+  `Tetrix\AiBridge\Events\TurnLostAfterDrop` event (`reason` `not_listed` / `grace_expired`).
+  The serve process checks the deadline and flushes held-back acks on a one-second timer.
+- `BridgeConnectionManager::isDetached()`, `detachedRequestIdsForUser()`, `reattachRunningTurns()`,
+  `expireDetachedRequests()`, `acceptSeq()`, `MessageTypes::STREAM_ACK`.
+
+### Unchanged
+
+- A bridge without `reliable_delivery` (no `seq`, no `running_turns`) behaves exactly as before: its
+  turns fail on the drop, and no `TurnLostAfterDrop` fires.
+
 ## [0.21.0] — 2026-10-16
 
 Hardens the upstream routes added in 0.19 (decision 0009).

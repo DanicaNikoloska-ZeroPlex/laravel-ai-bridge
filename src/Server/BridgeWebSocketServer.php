@@ -113,12 +113,30 @@ class BridgeWebSocketServer
             $this->loop->addPeriodicTimer($refreshInterval, fn () => $this->refreshAgingTokens());
         }
 
+        // Short drops (bridge `reliable_delivery`): send the stream_acks a throttle held back,
+        // and fail the detached turns whose bridge did not come back within the grace period.
+        // Both live only in this process, so this is where they are kept to time.
+        $this->loop->addPeriodicTimer(1.0, fn () => $this->tickReliableDelivery());
+
         if ($onStart !== null) {
             // Schedule the callback to run after the loop starts
             $this->loop->futureTick($onStart);
         }
 
         $this->loop->run();
+    }
+
+    /**
+     * The one-second tick of reliable delivery. Never throws: it runs in the event loop.
+     */
+    public function tickReliableDelivery(): void
+    {
+        try {
+            $this->messageHandler->flushStreamAcks();
+            $this->connectionManager->expireDetachedRequests();
+        } catch (\Throwable $e) {
+            BridgeLog::error('reliable delivery tick failed', ['error' => $e->getMessage()]);
+        }
     }
 
     /**

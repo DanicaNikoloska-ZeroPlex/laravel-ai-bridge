@@ -130,6 +130,23 @@ return [
          * 0 means no ceiling at all, for a server that bounds turns itself.
          */
         'request_timeout' => 86400,
+
+        /*
+         * Short drops (bridge capability `reliable_delivery`, PROTOCOL.md "Short drops").
+         *
+         * reconnect_grace_seconds: how long a turn survives its bridge's connection dropping.
+         * The bridge keeps running it and holds its output; the server keeps it pending,
+         * detached, and fails it with `bridge_disconnected` only if the bridge has not come
+         * back (and listed it as still running) within this many seconds. Sent to the bridge
+         * as `welcome.config.reconnect_grace_seconds`. A bridge without the capability is
+         * not affected: its turns fail on the drop.
+         *
+         * stream_ack_interval: the most seconds between two `stream_ack`s for a turn while
+         * its frames arrive (a final frame is always confirmed at once). 0 confirms every
+         * frame.
+         */
+        'reconnect_grace_seconds' => (int) env('AI_BRIDGE_RECONNECT_GRACE_SECONDS', 120),
+        'stream_ack_interval' => 1,
     ],
 
     /*

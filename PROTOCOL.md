@@ -125,6 +125,8 @@ A bridge that sends `capabilities.reliable_delivery: true` in `hello` keeps its 
 - **On the server side,** a turn of a `reliable_delivery` bridge whose connection drops is detached rather than failed. It stays pending for the same grace period and fails with `bridge_disconnected` only when the period ends without the bridge coming back.
 - **After reconnecting,** `hello` lists what is still running: `"running_turns": [{"request_id": "…", "last_acked_seq": N}]`. The server re-attaches each listed turn to the new connection; a detached turn the bridge does not list fails at once with `bridge_disconnected`. The bridge then re-sends every frame after `last_acked_seq` for each turn, including a final frame that was never confirmed.
 - **Duplicates are ignored.** The server stores a frame only when its `seq` is exactly one more than the last it stored for that turn, and drops any frame at or below it. Re-sending is therefore always safe.
+- **Re-issued turns.** After a `session_lost` error frame (which is confirmed like a final frame) the server re-issues the turn under the same `request_id`; the re-issued turn may number its frames from 1 again, or carry on from the error frame's `seq`.
+- **On the server,** frames of a turn the server has already ended are confirmed again with its final `seq`, a re-sent `tool_call` is not run a second time, and a turn that fails after a drop (not listed, or the grace period ended) fires `Tetrix\AiBridge\Events\TurnLostAfterDrop` with `reason` `not_listed` or `grace_expired`, so an application can tell it apart from a turn that was re-attached.
 - **Steps that need the server during a drop** (a file hand-over, a `turn_input` from the person) wait for the reconnect instead of failing, within the grace period.
 
 ---
@@ -353,7 +355,8 @@ Sent whether or not the posture matches the request, so a server always knows wh
   "config": {
     "heartbeat_interval": 30,
     "request_timeout": 86400,
-    "silence_timeout": 900
+    "silence_timeout": 900,
+    "reconnect_grace_seconds": 120
   },
   "refreshed_token": "<new JWT>",
   "desired_bridge_version": "0.24.1"
@@ -467,6 +470,8 @@ variable (`a-b` and `a.b`) fail the call rather than one overwriting the other.
 **`config.silence_timeout`**: How many seconds a turn may produce **nothing** before the CLI is presumed wedged and killed. Accepted range 10–86400; `0` disables it. Default 900. Optional — a bridge that has never heard of it keeps behaving as it did, and a server that omits it gets the default.
 
 It also sets how long the bridge waits for the server to answer a [`tool_call`](#tool-resolution-flow-cli-bridge): 90% of whichever of `silence_timeout` and `request_timeout` would end the turn first, never more than an hour — and, for the wall clock, 90% of the time *left* in the turn when the call is made, since that clock started with the turn rather than with the call. A CLI blocked on an unanswered tool call emits nothing, so the silence clock is what ends that wait either way; stopping just short of it means the CLI gets a tool error it can report and continue from, rather than the whole turn being killed to report one failed tool.
+
+**`config.reconnect_grace_seconds`**: How long a bridge that announced `reliable_delivery` keeps its running turns alive through a dropped connection, and how long the server keeps them detached, in seconds. Default 120 (`ai-bridge.websocket.reconnect_grace_seconds`). Ignored by a bridge without the capability. See [Short drops](#short-drops-reliable-delivery-capability-reliable_delivery).
 
 **Silence is the bound that kills, and that is the point.** A wall clock cannot tell a stuck CLI from a busy one: an assistant reading a codebase, waiting on a build or running a test suite produces nothing *of interest* for minutes at a time and is working throughout, while a turn streaming tool results continuously for five minutes is in the healthiest state a long turn has.
 

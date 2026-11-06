@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Log;
 use Tetrix\AiBridge\Contracts\SendableConnection;
 use Tetrix\AiBridge\Events\BridgeConnected;
 use Tetrix\AiBridge\Events\BridgeDisconnected;
+use Tetrix\AiBridge\Events\TurnLostAfterDrop;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Streaming\StreamHandler;
 
@@ -49,9 +50,26 @@ class BridgeConnectionManager
     /**
      * Map of request_id => pending request metadata.
      *
-     * @var array<string, array{stream_handler: StreamHandler, user_id: string}>
+     * `last_seq` is the highest `seq` stored for the turn (0 before the first; only a
+     * `reliable_delivery` bridge numbers its frames), `seq_restart` that a re-issued turn may
+     * start numbering again from 1, and `detached_until` the unix time a turn detached by a
+     * drop fails at unless its bridge re-attaches it (null while attached).
+     *
+     * @var array<string, array{stream_handler: StreamHandler, user_id: string, carry: array<string, mixed>, last_seq: int, seq_restart: bool, detached_until: int|null}>
      */
     private array $pendingRequests = [];
+
+    /**
+     * Turns that ended normally with a numbered final frame, by request id =>
+     * [user_id, final seq], the newest FINISHED_MEMORY entries. A bridge whose `stream_ack`
+     * for that final frame was lost in a drop re-sends it after reconnecting; this lets the
+     * server confirm it again instead of treating it as a turn it never knew.
+     *
+     * @var array<string, array{user_id: string, seq: int}>
+     */
+    private array $finishedRequests = [];
+
+    private const FINISHED_MEMORY = 500;
 
     /**
      * Usage questions waiting on an answer, keyed by the id that was sent.
@@ -190,8 +208,13 @@ class BridgeConnectionManager
 
         $connectionId = $this->connections[$userId]['connection_id'];
 
-        // Fail any pending requests for this user
-        $this->failPendingRequestsForUser($userId, $reason);
+        // Fail any pending requests for this user; a bridge that announced reliable_delivery
+        // keeps them, detached, for the grace period (see detachPendingRequestsForUser()).
+        if ($this->bridgeSupports($userId, 'reliable_delivery')) {
+            $this->detachPendingRequestsForUser($userId, $reason);
+        } else {
+            $this->failPendingRequestsForUser($userId, $reason);
+        }
 
         unset($this->connections[$userId]);
         unset($this->connectionIdIndex[$connectionId]);
@@ -345,7 +368,7 @@ class BridgeConnectionManager
 
     /**
      * Whether this user's connected bridge announced a capability at `hello`
-     * (`turn_input`, `input_closed`, `file_uploads`, `file_downloads`, `app_backends`).
+     * (`turn_input`, `input_closed`, `file_uploads`, `file_downloads`, `app_backends`, `reliable_delivery`).
      */
     public function bridgeSupports(int|string $userId, string $capability): bool
     {
@@ -577,7 +600,219 @@ class BridgeConnectionManager
             'stream_handler' => $handler,
             'user_id' => $userId,
             'carry' => $carry,
+            'last_seq' => 0,
+            'seq_restart' => false,
+            'detached_until' => null,
         ];
+    }
+
+    /** What a numbered frame is to its turn; see acceptSeq(). */
+    public const SEQ_STORE = 'store';
+
+    public const SEQ_DUPLICATE = 'duplicate';
+
+    public const SEQ_GAP = 'gap';
+
+    /**
+     * Decide whether a numbered `stream` frame of a pending turn is stored, and record it
+     * when it is.
+     *
+     * Stored only when `seq` is exactly one more than the last stored for that turn (or 1
+     * right after a `session_lost` re-issue, see allowSeqRestart()). At or below it is a
+     * re-send the server already has (SEQ_DUPLICATE, safe to drop); above it a frame went
+     * missing (SEQ_GAP): it is not stored, and the bridge re-sends in order after it
+     * reconnects. An unknown request is SEQ_GAP too: nothing can be stored for it here.
+     */
+    public function acceptSeq(string $requestId, int $seq): string
+    {
+        if (! isset($this->pendingRequests[$requestId])) {
+            return self::SEQ_GAP;
+        }
+
+        $entry = &$this->pendingRequests[$requestId];
+        $last = $entry['last_seq'] ?? 0;
+
+        if (($entry['seq_restart'] ?? false) && ($seq === 1 || $seq === $last + 1)) {
+            $entry['seq_restart'] = false;
+            $entry['last_seq'] = $seq;
+
+            return self::SEQ_STORE;
+        }
+
+        if ($seq <= $last) {
+            return self::SEQ_DUPLICATE;
+        }
+
+        if ($seq > $last + 1) {
+            return self::SEQ_GAP;
+        }
+
+        $entry['last_seq'] = $seq;
+
+        return self::SEQ_STORE;
+    }
+
+    /** The highest `seq` stored for a pending turn, 0 before the first (or when unknown). */
+    public function lastStoredSeq(string $requestId): int
+    {
+        return $this->pendingRequests[$requestId]['last_seq'] ?? 0;
+    }
+
+    /**
+     * A pending turn was re-issued under the same request id (`session_lost`): its next frame
+     * may number from 1 again, or carry on from the last stored.
+     */
+    public function allowSeqRestart(string $requestId): void
+    {
+        if (isset($this->pendingRequests[$requestId])) {
+            $this->pendingRequests[$requestId]['seq_restart'] = true;
+        }
+    }
+
+    /** Remember the final `seq` of a turn that has ended, for a re-send of it (see $finishedRequests). */
+    public function rememberFinishedRequest(string $requestId, int|string $userId, int $seq): void
+    {
+        unset($this->finishedRequests[$requestId]);
+        $this->finishedRequests[$requestId] = ['user_id' => (string) $userId, 'seq' => $seq];
+
+        while (count($this->finishedRequests) > self::FINISHED_MEMORY) {
+            unset($this->finishedRequests[array_key_first($this->finishedRequests)]);
+        }
+    }
+
+    /** The final `seq` of a turn of this user that has ended, or null. */
+    public function finishedRequestSeq(string $requestId, int|string $userId): ?int
+    {
+        $entry = $this->finishedRequests[$requestId] ?? null;
+
+        return $entry !== null && $entry['user_id'] === (string) $userId ? $entry['seq'] : null;
+    }
+
+    /** Whether a pending turn is detached: its bridge dropped and has not re-attached it yet. */
+    public function isDetached(string $requestId): bool
+    {
+        return ($this->pendingRequests[$requestId]['detached_until'] ?? null) !== null;
+    }
+
+    /**
+     * The ids of the detached turns a user owns.
+     *
+     * @return string[]
+     */
+    public function detachedRequestIdsForUser(int|string $userId): array
+    {
+        $needle = (string) $userId;
+
+        return array_map('strval', array_keys(array_filter(
+            $this->pendingRequests,
+            static fn (array $entry): bool => (string) $entry['user_id'] === $needle && ($entry['detached_until'] ?? null) !== null,
+        )));
+    }
+
+    /** How long a detached turn waits for its bridge, in seconds (`welcome.config.reconnect_grace_seconds`). */
+    public static function reconnectGraceSeconds(): int
+    {
+        return max(0, (int) config('ai-bridge.websocket.reconnect_grace_seconds', 120));
+    }
+
+    /**
+     * A `reliable_delivery` bridge said hello again: re-attach the detached turns it lists in
+     * `running_turns`, and fail at once, with `bridge_disconnected`, every detached turn of
+     * this user it does not list (the machine no longer runs it).
+     *
+     * A listed turn that is not detached (never was, or is unknown here) is left alone.
+     *
+     * @param  list<string>  $runningRequestIds  The `request_id`s of `hello.running_turns`.
+     * @return array{reattached: list<string>, failed: list<string>}
+     */
+    public function reattachRunningTurns(int|string $userId, array $runningRequestIds): array
+    {
+        $userId = (string) $userId;
+        $reattached = [];
+        $failed = [];
+
+        foreach ($this->detachedRequestIdsForUser($userId) as $requestId) {
+            if (in_array($requestId, $runningRequestIds, true)) {
+                $this->pendingRequests[$requestId]['detached_until'] = null;
+                $reattached[] = $requestId;
+            } else {
+                $this->failDetachedRequest($requestId, TurnLostAfterDrop::NOT_LISTED);
+                $failed[] = $requestId;
+            }
+        }
+
+        if ($reattached !== [] || $failed !== []) {
+            Log::info('AI Bridge: bridge reconnected; detached turns re-attached or failed', [
+                'user_id' => $userId,
+                'reattached' => $reattached,
+                'failed' => $failed,
+            ]);
+        }
+
+        return ['reattached' => $reattached, 'failed' => $failed];
+    }
+
+    /**
+     * Fail every detached turn whose grace period has passed without its bridge coming back.
+     *
+     * Called on a one-second timer by the serve process (BridgeWebSocketServer), the only
+     * process that holds these turns.
+     *
+     * @return int how many turns were failed
+     */
+    public function expireDetachedRequests(?int $now = null): int
+    {
+        $now ??= time();
+        $failed = 0;
+
+        foreach ($this->pendingRequests as $requestId => $entry) {
+            $until = $entry['detached_until'] ?? null;
+
+            if ($until !== null && $until <= $now) {
+                $this->failDetachedRequest((string) $requestId, TurnLostAfterDrop::GRACE_EXPIRED);
+                $failed++;
+            }
+        }
+
+        return $failed;
+    }
+
+    /** End a detached turn as lost: `bridge_disconnected` to its handler, then TurnLostAfterDrop. */
+    private function failDetachedRequest(string $requestId, string $reason): void
+    {
+        $entry = $this->pendingRequests[$requestId] ?? null;
+
+        if ($entry === null) {
+            return;
+        }
+
+        unset($this->pendingRequests[$requestId]);
+        $userId = (string) $entry['user_id'];
+        $this->rememberDroppedRequest($requestId, $userId);
+
+        $conversationId = '';
+
+        try {
+            $conversationId = $entry['stream_handler']->getConversationId();
+            $entry['stream_handler']->dispatchError('bridge_disconnected', 'Bridge connection lost.');
+        } catch (\Throwable $e) {
+            Log::warning('AI Bridge: could not end a detached turn', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        Log::info('AI Bridge: detached turn lost', ['request_id' => $requestId, 'user_id' => $userId, 'reason' => $reason]);
+
+        try {
+            Event::dispatch(new TurnLostAfterDrop($requestId, $userId, $conversationId, $reason));
+        } catch (\Throwable $e) {
+            // A listener must not stop the next turn being failed.
+            Log::warning('AI Bridge: a TurnLostAfterDrop listener failed', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -1080,6 +1315,42 @@ class BridgeConnectionManager
         }
 
         return $ended;
+    }
+
+    /**
+     * A `reliable_delivery` bridge went away: keep its turns pending, detached, for
+     * `reconnect_grace_seconds` instead of failing them. The machine keeps running them and
+     * holds their frames; its next `hello` re-attaches them (reattachRunningTurns()), and one
+     * it does not list, or one still detached when the period ends (expireDetachedRequests()),
+     * fails with `bridge_disconnected`.
+     *
+     * Usage questions, mid-turn messages and other exchanges are held open by an HTTP response
+     * and fail at once, as for any bridge.
+     */
+    private function detachPendingRequestsForUser(string $userId, ?string $reason = null): void
+    {
+        $until = time() + self::reconnectGraceSeconds();
+        $detached = [];
+
+        foreach ($this->pendingRequests as $requestId => $entry) {
+            if ($entry['user_id'] === $userId && ($entry['detached_until'] ?? null) === null) {
+                $this->pendingRequests[$requestId]['detached_until'] = $until;
+                $detached[] = (string) $requestId;
+            }
+        }
+
+        if ($detached !== []) {
+            Log::info('AI Bridge: bridge dropped; turns detached for the grace period', [
+                'user_id' => $userId,
+                'reason' => $reason,
+                'request_ids' => $detached,
+                'detached_until' => $until,
+            ]);
+        }
+
+        $this->failPendingUsageForUser($userId);
+        $this->failPendingTurnInputsForUser($userId);
+        $this->failPendingExchangesForUser($userId);
     }
 
     /**

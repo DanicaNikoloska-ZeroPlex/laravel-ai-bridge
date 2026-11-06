@@ -8,6 +8,7 @@ use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Events\BridgeConnected;
 use Tetrix\AiBridge\Events\BridgeDisconnected;
+use Tetrix\AiBridge\Events\TurnLostAfterDrop;
 use Tetrix\AiBridge\Streaming\StreamHandler;
 use Tetrix\AiBridge\Tests\TestCase;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
@@ -428,4 +429,129 @@ test('disconnectUser swallows close() failures and still removes the connection'
 
     expect($this->manager->disconnectUser('user-1'))->toBeTrue();
     expect($this->manager->hasConnection('user-1'))->toBeFalse();
+});
+
+// --- D09710: a reliable_delivery bridge's turns survive a short drop ---
+
+function reliableTurn(BridgeConnectionManager $manager, string $requestId, ?string &$errorCode = null): StreamHandler
+{
+    $handler = createTestStreamHandler();
+    $handler->onError(function (string $code) use (&$errorCode) {
+        $errorCode = $code;
+    });
+    $manager->registerPendingRequest($requestId, $handler, 'user-1');
+
+    return $handler;
+}
+
+function connectReliable(BridgeConnectionManager $manager, string $connectionId): void
+{
+    $manager->addConnection('user-1', $connectionId);
+    $manager->setBridgeInfo('user-1', ['capabilities' => ['reliable_delivery']]);
+}
+
+test('a reliable bridge dropping detaches its turns instead of failing them', function () {
+    connectReliable($this->manager, 'conn-1');
+    $code = null;
+    reliableTurn($this->manager, 'req-1', $code);
+
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+
+    expect($code)->toBeNull()
+        ->and($this->manager->getPendingRequest('req-1'))->not->toBeNull()
+        ->and($this->manager->isDetached('req-1'))->toBeTrue()
+        ->and($this->manager->detachedRequestIdsForUser('user-1'))->toBe(['req-1'])
+        ->and($this->manager->pendingRequestIdsForUser('user-1'))->toBe(['req-1']);
+});
+
+test('a reliable bridge replaced by a new connection detaches too, no bridge_reconnecting', function () {
+    connectReliable($this->manager, 'conn-old');
+    $code = null;
+    reliableTurn($this->manager, 'req-1', $code);
+
+    $this->manager->addConnection('user-1', 'conn-new');
+
+    expect($code)->toBeNull()
+        ->and($this->manager->isDetached('req-1'))->toBeTrue();
+});
+
+test('a listed detached turn is re-attached; an unlisted one fails at once with bridge_disconnected', function () {
+    connectReliable($this->manager, 'conn-1');
+    $code1 = null;
+    $code2 = null;
+    reliableTurn($this->manager, 'req-1', $code1);
+    reliableTurn($this->manager, 'req-2', $code2);
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+
+    connectReliable($this->manager, 'conn-2');
+    $result = $this->manager->reattachRunningTurns('user-1', ['req-1', 'req-unknown']);
+
+    expect($result)->toBe(['reattached' => ['req-1'], 'failed' => ['req-2']])
+        ->and($code1)->toBeNull()
+        ->and($this->manager->isDetached('req-1'))->toBeFalse()
+        ->and($code2)->toBe('bridge_disconnected')
+        ->and($this->manager->getPendingRequest('req-2'))->toBeNull()
+        ->and($this->manager->takeDroppedRequestOwner('req-2'))->toBe('user-1');
+
+    Event::assertDispatched(TurnLostAfterDrop::class, fn (TurnLostAfterDrop $e) => $e->requestId === 'req-2'
+        && $e->userId === 'user-1' && $e->conversationId === 'test-conv' && $e->reason === TurnLostAfterDrop::NOT_LISTED);
+    Event::assertDispatchedTimes(TurnLostAfterDrop::class, 1);
+});
+
+test('a detached turn fails with bridge_disconnected when the grace period passes', function () {
+    config(['ai-bridge.websocket.reconnect_grace_seconds' => 120]);
+    connectReliable($this->manager, 'conn-1');
+    $code = null;
+    reliableTurn($this->manager, 'req-1', $code);
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+
+    expect($this->manager->expireDetachedRequests(time() + 119))->toBe(0)
+        ->and($code)->toBeNull();
+
+    expect($this->manager->expireDetachedRequests(time() + 121))->toBe(1)
+        ->and($code)->toBe('bridge_disconnected')
+        ->and($this->manager->getPendingRequest('req-1'))->toBeNull();
+
+    Event::assertDispatched(TurnLostAfterDrop::class, fn (TurnLostAfterDrop $e) => $e->reason === TurnLostAfterDrop::GRACE_EXPIRED);
+});
+
+test('a re-attached turn is not failed when the grace period would have passed', function () {
+    connectReliable($this->manager, 'conn-1');
+    $code = null;
+    reliableTurn($this->manager, 'req-1', $code);
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+    connectReliable($this->manager, 'conn-2');
+    $this->manager->reattachRunningTurns('user-1', ['req-1']);
+
+    expect($this->manager->expireDetachedRequests(time() + 10_000))->toBe(0)
+        ->and($code)->toBeNull();
+    Event::assertNotDispatched(TurnLostAfterDrop::class);
+});
+
+test('an old bridge dropping still fails its turns at once and fires no TurnLostAfterDrop', function () {
+    $this->manager->addConnection('user-1', 'conn-1');
+    $code = null;
+    reliableTurn($this->manager, 'req-1', $code);
+
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+
+    expect($code)->toBe('bridge_disconnected')
+        ->and($this->manager->getPendingRequest('req-1'))->toBeNull();
+    Event::assertNotDispatched(TurnLostAfterDrop::class);
+});
+
+test('acceptSeq stores only the next seq, drops duplicates and refuses gaps', function () {
+    reliableTurn($this->manager, 'req-1');
+
+    expect($this->manager->acceptSeq('req-1', 2))->toBe(BridgeConnectionManager::SEQ_GAP)
+        ->and($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_STORE)
+        ->and($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_DUPLICATE)
+        ->and($this->manager->acceptSeq('req-1', 2))->toBe(BridgeConnectionManager::SEQ_STORE)
+        ->and($this->manager->lastStoredSeq('req-1'))->toBe(2)
+        ->and($this->manager->acceptSeq('unknown', 1))->toBe(BridgeConnectionManager::SEQ_GAP);
+
+    // A session_lost re-issue may number from 1 again.
+    $this->manager->allowSeqRestart('req-1');
+    expect($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_STORE)
+        ->and($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_DUPLICATE);
 });

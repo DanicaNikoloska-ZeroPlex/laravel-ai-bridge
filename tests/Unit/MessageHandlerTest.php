@@ -801,7 +801,8 @@ test('MessageTypes::all() contains all expected message type constants (EFF-006)
     expect($all)->toContain(MessageTypes::INPUT_CLOSED);
     expect($all)->toContain(MessageTypes::MCP_REQUEST);
     expect($all)->toContain(MessageTypes::UPSTREAM_AUTH_RESULT);
-    expect($all)->toHaveCount(48);
+    expect($all)->toContain(MessageTypes::STREAM_ACK);
+    expect($all)->toHaveCount(49);
 });
 
 test('turn_input is the server\'s to send and turn_input_ack the bridge\'s', function () {
@@ -1537,3 +1538,188 @@ test('a cancelled turn without pending inputs, or with a malformed list, passes 
 
     expect($meta)->toBe([]);
 })->with(['absent', [[]], 'a string', [['a' => 'msg-1']]]);
+
+// --- D09710: reliable delivery (numbered frames and stream_ack) ---
+
+/** A pending turn of user-1 on conn-1 that records the deltas it is given and the frames sent to the bridge. */
+function reliableRig(object $test): object
+{
+    $rig = new stdClass();
+    $rig->deltas = [];
+    $rig->sent = [];
+    $rig->done = 0;
+    $rig->handler = makeHandler($test->manager);
+    $rig->handler->onBlockDelta(function (StreamEvent $event) use ($rig) {
+        $rig->deltas[] = $event->data['content'] ?? null;
+    });
+    $rig->handler->onDone(function () use ($rig) {
+        $rig->done++;
+    });
+    $test->manager->setSendCallback(function ($connection, array $payload) use ($rig): bool {
+        $rig->sent[] = $payload;
+
+        return true;
+    });
+    $test->manager->addConnection('user-1', 'conn-1');
+    $test->manager->registerPendingRequest('req-1', $rig->handler, 'user-1');
+    $rig->acks = fn (): array => array_values(array_map(
+        fn (array $p) => $p['seq'],
+        array_filter($rig->sent, fn (array $p) => $p['type'] === MessageTypes::STREAM_ACK),
+    ));
+
+    return $rig;
+}
+
+function numberedDelta(int $seq, string $content, string $rid = 'req-1'): string
+{
+    return json_encode([
+        'type' => MessageTypes::STREAM, 'request_id' => $rid, 'seq' => $seq,
+        'event' => MessageTypes::BLOCK_DELTA,
+        'data' => ['block_type' => 'text', 'block_index' => 0, 'content' => $content],
+    ]);
+}
+
+function numberedDone(int $seq, string $rid = 'req-1'): string
+{
+    return json_encode(['type' => MessageTypes::STREAM, 'request_id' => $rid, 'seq' => $seq, 'event' => MessageTypes::DONE, 'data' => []]);
+}
+
+test('numbered frames in order are all stored and acked, the final one at once', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $rig = reliableRig($this);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(2, 'b'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(3));
+
+    expect($rig->deltas)->toBe(['a', 'b'])
+        ->and($rig->done)->toBe(1)
+        ->and(($rig->acks)())->toBe([1, 2, 3])
+        ->and($rig->sent[2])->toBe(['type' => 'stream_ack', 'request_id' => 'req-1', 'seq' => 3]);
+});
+
+test('a re-sent frame is dropped, not stored twice, and confirmed again', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $rig = reliableRig($this);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(2, 'b'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(2, 'b'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(3, 'c'));
+
+    expect($rig->deltas)->toBe(['a', 'b', 'c'])
+        ->and(($rig->acks)())->toBe([1, 2, 2, 2, 3]);
+});
+
+test('a frame after a gap is not stored or acked, and the re-send in order fills it', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    Log::spy();
+    $rig = reliableRig($this);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(3, 'c'));
+
+    expect($rig->deltas)->toBe(['a'])
+        ->and(($rig->acks)())->toBe([1])
+        ->and($this->manager->lastStoredSeq('req-1'))->toBe(1);
+    Log::shouldHaveReceived('warning')->withArgs(fn ($msg) => str_contains($msg, 'gap'))->once();
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(2, 'b'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(3, 'c'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(4));
+
+    expect($rig->deltas)->toBe(['a', 'b', 'c'])
+        ->and($rig->done)->toBe(1)
+        ->and(($rig->acks)())->toBe([1, 2, 3, 4]);
+});
+
+test('acks are throttled while frames arrive, owed ones go out on the flush, the final at once', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 60]);
+    $rig = reliableRig($this);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(2, 'b'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(3, 'c'));
+
+    expect(($rig->acks)())->toBe([1]);
+
+    expect($this->messageHandler->flushStreamAcks())->toBe(1)
+        ->and(($rig->acks)())->toBe([1, 3])
+        ->and($this->messageHandler->flushStreamAcks())->toBe(0);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(4, 'd'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(5));
+
+    expect(($rig->acks)())->toBe([1, 3, 5])
+        ->and($this->messageHandler->flushStreamAcks())->toBe(0);
+});
+
+test('a re-sent final frame of a turn already ended is confirmed again, not settled as an orphan', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $rig = reliableRig($this);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(2));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(2));
+
+    expect($rig->done)->toBe(1)
+        ->and(($rig->acks)())->toBe([1, 2, 2]);
+});
+
+test('another user cannot learn or confirm a turn through its final seq', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $rig = reliableRig($this);
+    $this->manager->addConnection('user-2', 'conn-2');
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(1));
+    $this->messageHandler->handleMessage('conn-2', null, numberedDone(1));
+    $this->messageHandler->handleMessage('conn-2', null, numberedDelta(1, 'x'));
+
+    expect(($rig->acks)())->toBe([1])
+        ->and($rig->deltas)->toBe([]);
+});
+
+test('an old bridge without seq is stored exactly as before and never acked', function () {
+    $rig = reliableRig($this);
+
+    foreach (['a', 'a', 'b'] as $content) {
+        $this->messageHandler->handleMessage('conn-1', null, json_encode([
+            'type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::BLOCK_DELTA,
+            'data' => ['block_type' => 'text', 'block_index' => 0, 'content' => $content],
+        ]));
+    }
+    $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::DONE, 'data' => [],
+    ]));
+
+    expect($rig->deltas)->toBe(['a', 'a', 'b'])
+        ->and($rig->done)->toBe(1)
+        ->and($rig->sent)->toBe([]);
+});
+
+test('a numbered tool_call is run once and a re-send of it is not run again', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $runs = 0;
+    $registry = new ToolRegistry();
+    $registry->register('echo', 'Echo test', ['type' => 'object'], function ($p) use (&$runs) {
+        $runs++;
+
+        return ['echoed' => $p];
+    });
+    $mh = makeMessageHandler($this->manager, $registry);
+    $rig = reliableRig($this);
+
+    $frame = json_encode([
+        'type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'seq' => 1, 'event' => MessageTypes::TOOL_CALL,
+        'data' => ['tool_name' => 'echo', 'parameters' => ['x' => 1], 'tool_call_id' => 'c-1'],
+    ]);
+
+    $first = $mh->handleMessage('conn-1', null, $frame);
+    $again = $mh->handleMessage('conn-1', null, $frame);
+
+    expect($first['type'] ?? null)->toBe(MessageTypes::TOOL_RESOLVE)
+        ->and($again)->toBeNull()
+        ->and($runs)->toBe(1)
+        ->and(($rig->acks)())->toBe([1, 1]);
+});

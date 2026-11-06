@@ -355,3 +355,96 @@ it('reads a status from a serve process that reports only the flat bridge_versio
         ->and($status['capabilities'])->toBe([])
         ->and($connection->fresh()->last_bridge['bridge_version'])->toBe('0.24.0');
 });
+
+// --- D09710: reliable delivery through a short drop -----------------------------
+
+const HELLO_RELIABLE = [
+    'type' => 'hello',
+    'version' => '0.1',
+    'bridge_version' => '0.40.0',
+    'providers' => [],
+    'capabilities' => ['reliable_delivery' => true],
+];
+
+it('records reliable_delivery from hello.capabilities and sends the grace period in welcome', function () {
+    config(['ai-bridge.websocket.reconnect_grace_seconds' => 90]);
+    $rig = helloRig();
+    $rig->manager->addConnection('user-1', 'conn-1');
+
+    $reply = $rig->handler->handleMessage('conn-1', null, json_encode(HELLO_RELIABLE));
+
+    expect($rig->manager->bridgeSupports('user-1', 'reliable_delivery'))->toBeTrue()
+        ->and($reply['config']['reconnect_grace_seconds'])->toBe(90);
+});
+
+it('sends the default grace period of 120 seconds, and an old hello has no reliable_delivery', function () {
+    $rig = helloRig();
+    $rig->manager->addConnection('user-1', 'conn-1');
+
+    $reply = $rig->handler->handleMessage('conn-1', null, json_encode(HELLO_021 + ['capabilities' => ['reliable_delivery' => 'yes']]));
+
+    expect($reply['config']['reconnect_grace_seconds'])->toBe(120)
+        ->and($rig->manager->bridgeSupports('user-1', 'reliable_delivery'))->toBeFalse();
+});
+
+it('re-attaches the turns a reconnecting bridge lists, fails the rest, and the listed one streams on', function () {
+    $rig = helloRig();
+    $rig->manager->addConnection('user-1', 'conn-1');
+    $rig->handler->handleMessage('conn-1', null, json_encode(HELLO_RELIABLE));
+
+    $kept = pendingTurn($rig->manager, 'req-1', 'user-1');
+    $lost = pendingTurn($rig->manager, 'req-2', 'user-1');
+    $deltas = [];
+    $kept->onBlockDelta(function ($event) use (&$deltas) {
+        $deltas[] = $event->data['content'];
+    });
+    $lostCode = null;
+    $lost->onError(function (string $code) use (&$lostCode) {
+        $lostCode = $code;
+    });
+
+    $rig->handler->handleMessage('conn-1', null, json_encode([
+        'type' => 'stream', 'request_id' => 'req-1', 'seq' => 1, 'event' => 'block_delta',
+        'data' => ['block_type' => 'text', 'block_index' => 0, 'content' => 'a'],
+    ]));
+
+    // The socket drops; the bridge comes back on a new one.
+    $rig->manager->removeConnectionByConnectionId('conn-1', 'websocket_closed');
+    $rig->manager->addConnection('user-1', 'conn-2');
+    expect($lostCode)->toBeNull();
+
+    $rig->handler->handleMessage('conn-2', null, json_encode(HELLO_RELIABLE + [
+        'running_turns' => [['request_id' => 'req-1', 'last_acked_seq' => 0], 'junk', ['request_id' => 7]],
+    ]));
+
+    expect($lostCode)->toBe('bridge_disconnected')
+        ->and($rig->manager->isDetached('req-1'))->toBeFalse();
+    Event::assertDispatched(\Tetrix\AiBridge\Events\TurnLostAfterDrop::class, fn ($e) => $e->requestId === 'req-2');
+
+    // The bridge re-sends from after its last confirmed frame: 1 again, then 2.
+    foreach ([1 => 'a', 2 => 'b'] as $seq => $content) {
+        $rig->handler->handleMessage('conn-2', null, json_encode([
+            'type' => 'stream', 'request_id' => 'req-1', 'seq' => $seq, 'event' => 'block_delta',
+            'data' => ['block_type' => 'text', 'block_index' => 0, 'content' => $content],
+        ]));
+    }
+
+    expect($deltas)->toBe(['a', 'b']);
+});
+
+it('fails every detached turn when an older bridge replaces a reliable one', function () {
+    $rig = helloRig();
+    $rig->manager->addConnection('user-1', 'conn-1');
+    $rig->handler->handleMessage('conn-1', null, json_encode(HELLO_RELIABLE));
+    $turn = pendingTurn($rig->manager, 'req-1', 'user-1');
+    $code = null;
+    $turn->onError(function (string $c) use (&$code) {
+        $code = $c;
+    });
+
+    $rig->manager->addConnection('user-1', 'conn-2');
+    $rig->handler->handleMessage('conn-2', null, json_encode(HELLO_021));
+
+    expect($code)->toBe('bridge_disconnected')
+        ->and($rig->manager->getPendingRequest('req-1'))->toBeNull();
+});

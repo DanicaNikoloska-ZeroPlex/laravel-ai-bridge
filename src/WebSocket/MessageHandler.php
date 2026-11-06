@@ -285,6 +285,7 @@ class MessageHandler
             $this->connectionManager->setProviders($existingUserId, $providers);
             $this->connectionManager->setWorkspaces($existingUserId, self::asList($message['workspaces'] ?? null));
             $this->connectionManager->setBridgeInfo($existingUserId, self::bridgeInfoFromHello($message));
+            $this->reattachRunningTurns($existingUserId, $message);
 
             $this->logBridgeConnection($existingUserId, $connectionId, $protocolVersion, $providers, 'pre-authenticated');
 
@@ -333,10 +334,38 @@ class MessageHandler
         // setter writes into.
         $this->connectionManager->setWorkspaces($userId, self::asList($message['workspaces'] ?? null));
         $this->connectionManager->setBridgeInfo($userId, self::bridgeInfoFromHello($message));
+        $this->reattachRunningTurns($userId, $message);
 
         $this->logBridgeConnection($userId, $connectionId, $protocolVersion, $providers, 'connected');
 
         return $this->buildWelcomeResponse($connectionId, $userId);
+    }
+
+    /**
+     * The turns a bridge lists in `hello.running_turns` (`[{request_id, last_acked_seq}]`),
+     * re-attached to this connection; every other detached turn of the user fails at once.
+     *
+     * Runs for every hello: a bridge without `reliable_delivery` lists nothing, so a turn a
+     * reliable bridge left detached and an older bridge now replaces is failed rather than
+     * waited on. Entries that are not objects with a string `request_id` are ignored.
+     *
+     * @param  array<string, mixed>  $message
+     */
+    private function reattachRunningTurns(string $userId, array $message): void
+    {
+        $listed = [];
+        $raw = $message['running_turns'] ?? null;
+
+        if (is_array($raw) && array_is_list($raw)) {
+            foreach ($raw as $turn) {
+                $id = is_array($turn) ? ($turn['request_id'] ?? null) : null;
+                if (is_string($id) && $id !== '' && strlen($id) <= 256) {
+                    $listed[] = $id;
+                }
+            }
+        }
+
+        $this->connectionManager->reattachRunningTurns($userId, $listed);
     }
 
     /**
@@ -628,6 +657,13 @@ class MessageHandler
             }
         }
 
+        // Announced under `capabilities` (PROTOCOL.md, "Short drops"); the flat form the
+        // older flags use is accepted as well.
+        $nested = is_array($message['capabilities'] ?? null) ? $message['capabilities'] : [];
+        if (($nested['reliable_delivery'] ?? null) === true || ($message['reliable_delivery'] ?? null) === true) {
+            $capabilities[] = 'reliable_delivery';
+        }
+
         return [
             'bridge_version' => is_string($version) && $version !== '' ? mb_substr($version, 0, 64) : null,
             'protocol_version' => is_string($protocol) && $protocol !== '' ? mb_substr($protocol, 0, 32) : null,
@@ -741,6 +777,10 @@ class MessageHandler
                 // field ignores it and keeps its own behaviour, so this can
                 // ship without the two moving in step.
                 'silence_timeout' => (int) config('ai-bridge.websocket.silence_timeout', 900),
+                // How long a reliable_delivery bridge keeps its turns running through a drop,
+                // and how long this server keeps them detached (PROTOCOL.md, "Short drops").
+                // Ignored by a bridge without the capability.
+                'reconnect_grace_seconds' => BridgeConnectionManager::reconnectGraceSeconds(),
             ] + self::handedBackConfig(),
             // How much the local CLI environment is allowed to influence
             // behaviour. The bridge translates this into a different per-
@@ -1060,6 +1100,174 @@ class MessageHandler
 
             return null;
         }
+
+        // A reliable_delivery bridge numbers its frames: store each exactly once, in order.
+        // A frame without `seq` (an older bridge) goes through exactly as before.
+        $seq = $message['seq'] ?? null;
+        if (is_int($seq) && $seq >= 1) {
+            return $this->handleNumberedFrame($connectionId, (string) $requestId, (string) $eventType, $seq, $message);
+        }
+
+        return $this->routeStreamEvent($connectionId, $message);
+    }
+
+    /**
+     * A numbered `stream` frame (bridge `reliable_delivery`, PROTOCOL.md "Short drops").
+     *
+     * Stored only when its `seq` is exactly one more than the last stored for the turn
+     * (BridgeConnectionManager::acceptSeq()). A re-send of a frame already stored is dropped
+     * and confirmed again; a frame after a gap is dropped without a confirmation, and the
+     * bridge re-sends from the last confirmed one after it reconnects. What was stored is
+     * confirmed with a cumulative `stream_ack` (see ackStream()).
+     *
+     * A frame for a request this server does not hold, or from a user that does not own it,
+     * goes the usual way (and is refused or settled there), except the re-sent final frame of
+     * a turn that has already ended here, which is confirmed again so the bridge can let go.
+     *
+     * @param  array<string, mixed>  $message
+     */
+    private function handleNumberedFrame(string $connectionId, string $requestId, string $eventType, int $seq, array $message): ?array
+    {
+        $senderUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
+
+        if ($senderUserId === null || $this->connectionManager->getPendingRequestUserId($requestId) !== $senderUserId) {
+            $finalSeq = $senderUserId === null ? null : $this->connectionManager->finishedRequestSeq($requestId, $senderUserId);
+
+            if ($finalSeq !== null) {
+                $this->ackStream($senderUserId, $requestId, $finalSeq, true);
+
+                return null;
+            }
+
+            return $this->routeStreamEvent($connectionId, $message);
+        }
+
+        $verdict = $this->connectionManager->acceptSeq($requestId, $seq);
+
+        if ($verdict === BridgeConnectionManager::SEQ_DUPLICATE) {
+            $this->ackStream($senderUserId, $requestId, $this->connectionManager->lastStoredSeq($requestId), false);
+
+            return null;
+        }
+
+        if ($verdict === BridgeConnectionManager::SEQ_GAP) {
+            Log::warning('AI Bridge: stream frame after a gap, not stored; waiting for the re-send', [
+                'request_id' => $requestId,
+                'seq' => $seq,
+                'last_stored' => $this->connectionManager->lastStoredSeq($requestId),
+            ]);
+
+            return null;
+        }
+
+        $response = $this->routeStreamEvent($connectionId, $message);
+
+        if ($this->connectionManager->getPendingRequest($requestId) === null) {
+            // The turn ended with this frame (done, error, or a stop seen on it).
+            $this->connectionManager->rememberFinishedRequest($requestId, $senderUserId, $seq);
+            $this->ackStream($senderUserId, $requestId, $seq, true);
+        } elseif ($eventType === MessageTypes::ERROR || $eventType === MessageTypes::DONE) {
+            // Still pending after a final frame: a session_lost re-issue, which runs on under
+            // the same request id and may number its frames from 1 again.
+            $this->connectionManager->allowSeqRestart($requestId);
+            $this->ackStream($senderUserId, $requestId, $seq, true);
+        } else {
+            $this->ackStream($senderUserId, $requestId, $seq, false);
+        }
+
+        return $response;
+    }
+
+    /**
+     * Unsent `stream_ack`s, by request id: the newest stored seq and whom to send it to.
+     *
+     * @var array<string, array{user_id: string, seq: int}>
+     */
+    private array $owedAcks = [];
+
+    /**
+     * When the last `stream_ack` for a request was sent, by request id (microtime).
+     *
+     * @var array<string, float>
+     */
+    private array $lastAckAt = [];
+
+    /**
+     * Confirm what is stored for a turn, cumulatively ("everything up to $seq arrived").
+     *
+     * Sent at once for a final frame, for the first frame, and whenever the last ack for the
+     * turn is at least `ai-bridge.websocket.stream_ack_interval` seconds old (default 1; 0
+     * acks every frame). Otherwise it is owed, and flushStreamAcks(), on the serve process's
+     * one-second timer, sends it: so an ack goes out at least every second while frames
+     * arrive, however they are spaced.
+     */
+    private function ackStream(string $userId, string $requestId, int $seq, bool $final): void
+    {
+        $interval = (float) config('ai-bridge.websocket.stream_ack_interval', 1);
+        $now = microtime(true);
+        $last = $this->lastAckAt[$requestId] ?? null;
+
+        if (! $final && $last !== null && $now - $last < $interval) {
+            $this->owedAcks[$requestId] = ['user_id' => $userId, 'seq' => $seq];
+
+            return;
+        }
+
+        $this->sendStreamAck($userId, $requestId, $seq);
+
+        if ($final) {
+            unset($this->lastAckAt[$requestId]);
+        } else {
+            $this->lastAckAt[$requestId] = $now;
+        }
+    }
+
+    /**
+     * Send every owed `stream_ack` now. Called by the serve process every second.
+     *
+     * @return int how many were sent
+     */
+    public function flushStreamAcks(): int
+    {
+        $owed = $this->owedAcks;
+        $this->owedAcks = [];
+        $now = microtime(true);
+
+        foreach ($owed as $requestId => $ack) {
+            $this->sendStreamAck($ack['user_id'], (string) $requestId, $ack['seq']);
+            $this->lastAckAt[$requestId] = $now;
+        }
+
+        // Forget the throttle of turns that ended some other way (failed on a drop, stopped).
+        foreach (array_keys($this->lastAckAt) as $requestId) {
+            if ($this->connectionManager->getPendingRequest((string) $requestId) === null) {
+                unset($this->lastAckAt[$requestId]);
+            }
+        }
+
+        return count($owed);
+    }
+
+    private function sendStreamAck(string $userId, string $requestId, int $seq): void
+    {
+        unset($this->owedAcks[$requestId]);
+
+        $this->connectionManager->sendToUser($userId, [
+            'type' => MessageTypes::STREAM_ACK,
+            'request_id' => $requestId,
+            'seq' => $seq,
+        ]);
+    }
+
+    /**
+     * Route one `stream` envelope to what handles its event.
+     *
+     * @param  array<string, mixed>  $message
+     */
+    private function routeStreamEvent(string $connectionId, array $message): ?array
+    {
+        $requestId = $message['request_id'] ?? '';
+        $eventType = $message['event'] ?? '';
 
         // Handle tool_call events inside the stream envelope specially
         if ($eventType === MessageTypes::TOOL_CALL) {

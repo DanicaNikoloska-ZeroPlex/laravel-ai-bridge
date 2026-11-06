@@ -464,6 +464,8 @@ Full reference for `config/ai-bridge.php`:
 
 | `websocket.silence_timeout` | -- | `900` | Seconds a turn may produce **nothing** before the CLI is presumed wedged. This is the bound that stops a turn; `0` disables it. A long-running tool counts as silence — a `sleep 20` produces a 17-second gap — so this must exceed the longest build or test run you expect |
 | `websocket.request_timeout` | -- | `86400` | Wall-clock backstop for one turn, in seconds. `0` means no ceiling |
+| `websocket.reconnect_grace_seconds` | `AI_BRIDGE_RECONNECT_GRACE_SECONDS` | `120` | How long a turn of a `reliable_delivery` bridge survives a dropped connection (detached, waiting for the bridge to list it again) before it fails with `bridge_disconnected`. Sent as `welcome.config.reconnect_grace_seconds` |
+| `websocket.stream_ack_interval` | -- | `1` | Most seconds between two `stream_ack`s for a turn while its frames arrive; a final frame is confirmed at once. `0` confirms every frame |
 | `chat_completions.endpoint` | `AI_BRIDGE_ENDPOINT` | `null` | Chat Completions API base URL |
 | `chat_completions.api_key` | `AI_BRIDGE_API_KEY` | `null` | API key for BYOK/managed |
 | `chat_completions.model` | `AI_BRIDGE_MODEL` | `null` | Model name (e.g. `gpt-4o`) |
