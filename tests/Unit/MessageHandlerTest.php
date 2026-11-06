@@ -1655,7 +1655,7 @@ test('acks are throttled while frames arrive, owed ones go out on the flush, the
         ->and($this->messageHandler->flushStreamAcks())->toBe(0);
 });
 
-test('a re-sent final frame of a turn already ended is confirmed again, not settled as an orphan', function () {
+test('a re-sent final frame of a turn already ended is confirmed again as closed, not settled as an orphan', function () {
     config(['ai-bridge.websocket.stream_ack_interval' => 0]);
     $rig = reliableRig($this);
 
@@ -1664,19 +1664,23 @@ test('a re-sent final frame of a turn already ended is confirmed again, not sett
     $this->messageHandler->handleMessage('conn-1', null, numberedDone(2));
 
     expect($rig->done)->toBe(1)
-        ->and(($rig->acks)())->toBe([1, 2, 2]);
+        ->and(($rig->acks)())->toBe([1, 2, 2])
+        ->and(end($rig->sent))->toBe(['type' => 'stream_ack', 'request_id' => 'req-1', 'seq' => 2, 'closed' => true]);
 });
 
-test('another user cannot learn or confirm a turn through its final seq', function () {
+test('another user learns nothing of a turn through its final seq: answered as for any unknown turn', function () {
     config(['ai-bridge.websocket.stream_ack_interval' => 0]);
     $rig = reliableRig($this);
     $this->manager->addConnection('user-2', 'conn-2');
 
     $this->messageHandler->handleMessage('conn-1', null, numberedDone(1));
+    $rig->sent = [];
     $this->messageHandler->handleMessage('conn-2', null, numberedDone(1));
     $this->messageHandler->handleMessage('conn-2', null, numberedDelta(1, 'x'));
+    $this->messageHandler->handleMessage('conn-2', null, numberedDelta(1, 'x', 'req-never-known'));
 
-    expect(($rig->acks)())->toBe([1])
+    $closed = fn (string $rid) => ['type' => 'stream_ack', 'request_id' => $rid, 'seq' => 1, 'closed' => true];
+    expect($rig->sent)->toBe([$closed('req-1'), $closed('req-1'), $closed('req-never-known')])
         ->and($rig->deltas)->toBe([]);
 });
 
@@ -1722,4 +1726,150 @@ test('a numbered tool_call is run once and a re-send of it is not run again', fu
         ->and($again)->toBeNull()
         ->and($runs)->toBe(1)
         ->and(($rig->acks)())->toBe([1, 1]);
+});
+
+// --- D09710 rework: receipts for turns the server ended or does not hold ---
+
+test('a frame whose processing throws is not counted as stored, so its re-send is stored (#14257)', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $rig = reliableRig($this);
+    $provider = Mockery::mock(StreamableProvider::class);
+    $provider->shouldReceive('start', 'cancel', 'markCompleted')->byDefault();
+    $flaky = new class($provider) extends StreamHandler
+    {
+        public int $failuresLeft = 1;
+
+        public array $stored = [];
+
+        public function dispatchEvent(StreamEvent $event): void
+        {
+            if ($this->failuresLeft-- > 0) {
+                throw new RuntimeException('store hiccup');
+            }
+            $this->stored[] = $event->data['content'] ?? null;
+        }
+    };
+    $flaky->setMode(ProviderMode::Bridge);
+    $this->manager->registerPendingRequest('req-2', $flaky, 'user-1');
+
+    expect(fn () => $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a', 'req-2')))
+        ->toThrow(RuntimeException::class);
+    expect($this->manager->lastStoredSeq('req-2'))->toBe(0)
+        ->and(($rig->acks)())->toBe([]);
+
+    // The bridge re-sends it (it was never confirmed): stored now, not a duplicate.
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a', 'req-2'));
+
+    expect($flaky->stored)->toBe(['a'])
+        ->and($this->manager->lastStoredSeq('req-2'))->toBe(1)
+        ->and(($rig->acks)())->toBe([1]);
+});
+
+test('a numbered frame of a turn the server never held is answered closed with its own seq, and still settled (#14260)', function () {
+    $rig = reliableRig($this);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(4, 'x', 'req-gone'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(5, 'req-gone'));
+
+    expect($rig->sent)->toBe([
+        ['type' => 'stream_ack', 'request_id' => 'req-gone', 'seq' => 4, 'closed' => true],
+        ['type' => 'stream_ack', 'request_id' => 'req-gone', 'seq' => 5, 'closed' => true],
+    ]);
+});
+
+test('a stop seen on the heartbeat tells a reliable bridge the turn is closed, with the last stored seq (#14273)', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $store = new ArrayStreamStore();
+    app()->instance(StreamStoreContract::class, $store);
+    $rig = reliableRig($this);
+    $this->manager->setBridgeInfo('user-1', ['capabilities' => ['reliable_delivery']]);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(2, 'b'));
+    $store->setAbort('req-1');
+    $this->messageHandler->handleMessage('conn-1', null, json_encode(['type' => MessageTypes::PING, 'timestamp' => 1]));
+
+    expect(array_slice($rig->sent, 2))->toBe([
+        ['type' => MessageTypes::CANCEL, 'request_id' => 'req-1'],
+        ['type' => 'stream_ack', 'request_id' => 'req-1', 'seq' => 2, 'closed' => true],
+    ]);
+
+    // The bridge's own ending after the cancel is confirmed with its own seq, still closed.
+    $rig->sent = [];
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(3));
+    expect($rig->sent)->toBe([['type' => 'stream_ack', 'request_id' => 'req-1', 'seq' => 3, 'closed' => true]]);
+});
+
+test('a stop seen on a numbered frame is confirmed once, closed, with that frame\'s seq (#14273)', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $store = new ArrayStreamStore();
+    app()->instance(StreamStoreContract::class, $store);
+    $rig = reliableRig($this);
+    $this->manager->setBridgeInfo('user-1', ['capabilities' => ['reliable_delivery']]);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $store->setAbort('req-1');
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(2, 'b'));
+    $this->messageHandler->handleMessage('conn-1', null, numberedDone(3));
+
+    $closed = array_values(array_filter($rig->sent, fn (array $p) => ($p['closed'] ?? false) === true));
+    expect($rig->deltas)->toBe(['a'])
+        ->and(array_column($closed, 'seq'))->toBe([2, 3]);
+});
+
+test('a stop on the heartbeat sends no closed stream_ack to a bridge without reliable_delivery', function () {
+    $store = new ArrayStreamStore();
+    app()->instance(StreamStoreContract::class, $store);
+    $rig = reliableRig($this);
+    $store->setAbort('req-1');
+
+    $this->messageHandler->handleMessage('conn-1', null, json_encode(['type' => MessageTypes::PING, 'timestamp' => 1]));
+
+    expect(array_column($rig->sent, 'type'))->toBe([MessageTypes::CANCEL]);
+});
+
+test('after a closed stream_ack for a Stop, the bridge\'s unnumbered cancelled records its unread messages and is never answered', function (bool $onFrame) {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    Log::spy();
+    $store = new ArrayStreamStore();
+    app()->instance(StreamStoreContract::class, $store);
+    $rig = reliableRig($this);
+    $this->manager->setBridgeInfo('user-1', ['capabilities' => ['reliable_delivery']]);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $store->setAbort('req-1');
+    $this->messageHandler->handleMessage('conn-1', null, $onFrame
+        ? numberedDelta(2, 'b')
+        : json_encode(['type' => MessageTypes::PING, 'timestamp' => 1]));
+    expect(collect($rig->sent)->where('closed', true))->toHaveCount(1);
+    $rig->sent = [];
+
+    $reply = $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::CANCELLED, 'request_id' => 'req-1', 'pending_inputs' => ['m-1', 'm-2'],
+    ]));
+
+    expect($reply)->toBeNull()
+        ->and($rig->sent)->toBe([]);
+    Event::assertDispatched(\Tetrix\AiBridge\Events\TurnInputsReturned::class, fn ($e) => $e->requestId === 'req-1'
+        && $e->pendingInputs === ['m-1', 'm-2'] && (string) $e->userId === 'user-1');
+    Log::shouldNotHaveReceived('warning');
+    Log::shouldNotHaveReceived('error');
+})->with(['stop seen on a frame' => true, 'stop seen on the heartbeat' => false]);
+
+test('an unnumbered cancelled without pending_inputs for a turn the server closed is ignored quietly', function () {
+    Log::spy();
+    $store = new ArrayStreamStore();
+    app()->instance(StreamStoreContract::class, $store);
+    $rig = reliableRig($this);
+    $this->manager->setBridgeInfo('user-1', ['capabilities' => ['reliable_delivery']]);
+    $store->setAbort('req-1');
+    $this->messageHandler->handleMessage('conn-1', null, json_encode(['type' => MessageTypes::PING, 'timestamp' => 1]));
+    $rig->sent = [];
+
+    $reply = $this->messageHandler->handleMessage('conn-1', null, json_encode(['type' => MessageTypes::CANCELLED, 'request_id' => 'req-1']));
+
+    expect($reply)->toBeNull()->and($rig->sent)->toBe([]);
+    Event::assertNotDispatched(\Tetrix\AiBridge\Events\TurnInputsReturned::class);
+    Log::shouldNotHaveReceived('warning');
+    Log::shouldNotHaveReceived('error');
 });

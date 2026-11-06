@@ -20,8 +20,32 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   or one still detached when the period ends, fails with `bridge_disconnected` and fires the new
   `Tetrix\AiBridge\Events\TurnLostAfterDrop` event (`reason` `not_listed` / `grace_expired`).
   The serve process checks the deadline and flushes held-back acks on a one-second timer.
+- `stream_ack` with **`closed: true`**: the turn is over on the server's side, so the bridge lets go of
+  it (and stops it if it still runs). Sent when the server ends a turn itself while the bridge is
+  connected (a Stop, with the last stored `seq`), and in answer to every numbered frame of a turn the
+  server does not hold (ended, never known, or beyond the memory of the newest 500 finished turns),
+  with that frame's own `seq`.
+- **Work for the machine waits out a short drop** of a `reliable_delivery` bridge, within the grace
+  period: a usage question, a `turn_input`, an `mcp_request` or upstream sign-in step asked during the
+  drop is held and sent after the bridge's next `hello`; a usage question or `turn_input` already out is
+  sent again (a bridge takes a `message_id` once); a file hand-over in progress carries on (its bytes
+  have their own connection) and its frames due during the drop are held. Each step's timeout starts
+  when its frame is written. When the grace period ends without the machine they fail as before, a
+  `turn_input` with the new reason **`connection_lost`** (its turn ended too; do not count the message
+  as delivered). An `mcp_request` or sign-in step already out still fails at once: it may have run.
+- A turn lost after a drop says why in its `bridge_disconnected` message: the machine came back
+  without the reply, or did not come back within the grace period.
+- A frame counts as stored only after it was processed without an error, so a frame lost to a
+  server-side error is stored when the bridge re-sends it instead of being dropped as a duplicate.
+- Only a transport-level drop detaches a `reliable_delivery` bridge's turns. A revoked connection
+  (`disconnectUser()`, close 4001) and a bridge that closes normally (1000, shutting down) fail them at
+  once. A reconnect that drops again before its `hello` keeps the turns of the earlier drop detached.
+- A tool call whose answer was lost in a drop is failed by the bridge, which never sends it again;
+  the server has no re-send handling for tool calls.
 - `BridgeConnectionManager::isDetached()`, `detachedRequestIdsForUser()`, `reattachRunningTurns()`,
-  `expireDetachedRequests()`, `acceptSeq()`, `MessageTypes::STREAM_ACK`.
+  `expireDetachedRequests()`, `acceptSeq()` / `commitSeq()`, `isAwaitingReconnect()`, `canReach()`,
+  `reachableBridgeInfo()`, `reachableBridgeSupports()`, `sendOrHold()`, `flushHeldFrames()`,
+  `lostAfterDropMessage()`, `MessageTypes::STREAM_ACK`.
 
 ### Unchanged
 

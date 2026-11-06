@@ -448,3 +448,33 @@ it('fails every detached turn when an older bridge replaces a reliable one', fun
     expect($code)->toBe('bridge_disconnected')
         ->and($rig->manager->getPendingRequest('req-1'))->toBeNull();
 });
+
+it('accepts reliable_delivery in the flat hello form too (#14262, #14269)', function () {
+    $rig = helloRig();
+    $rig->manager->addConnection('user-1', 'conn-1');
+
+    $rig->handler->handleMessage('conn-1', null, json_encode(HELLO_021 + ['reliable_delivery' => true]));
+
+    expect($rig->manager->bridgeSupports('user-1', 'reliable_delivery'))->toBeTrue();
+});
+
+it('ignores a running_turns id over 256 characters, so that turn is not re-attached (#14262)', function () {
+    $rig = helloRig();
+    $rig->manager->addConnection('user-1', 'conn-1');
+    $rig->handler->handleMessage('conn-1', null, json_encode(HELLO_RELIABLE));
+    $long = str_repeat('r', 257);
+    $turn = pendingTurn($rig->manager, $long, 'user-1');
+    $code = null;
+    $turn->onError(function (string $c) use (&$code) {
+        $code = $c;
+    });
+
+    $rig->manager->removeConnectionByConnectionId('conn-1', 'websocket_closed');
+    $rig->manager->addConnection('user-1', 'conn-2');
+    $rig->handler->handleMessage('conn-2', null, json_encode(HELLO_RELIABLE + [
+        'running_turns' => [['request_id' => $long, 'last_acked_seq' => 0]],
+    ]));
+
+    expect($code)->toBe('bridge_disconnected')
+        ->and($rig->manager->getPendingRequest($long))->toBeNull();
+});

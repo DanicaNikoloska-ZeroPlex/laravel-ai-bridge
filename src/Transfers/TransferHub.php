@@ -149,19 +149,21 @@ final class TransferHub
             return;
         }
 
-        if (! $this->connections->hasConnection($userId)) {
+        // A machine on a short drop (reliable_delivery) counts as connected: the offer waits
+        // for the reconnect, within the grace period (PROTOCOL.md, "Short drops").
+        if (! $this->connections->canReach($userId)) {
             self::answer($worker, 409, ['ok' => false, 'code' => 'not_connected', 'error' => 'The machine is not connected. Files go straight to it rather than being kept here, so it has to be on.'], drain: true);
 
             return;
         }
 
-        if (! $this->connections->bridgeSupports($userId, 'file_uploads')) {
+        if (! $this->connections->reachableBridgeSupports($userId, 'file_uploads')) {
             self::answer($worker, 409, ['ok' => false, 'code' => 'unsupported', 'error' => 'The bridge on this machine is too old to receive files directly. Update it there, then add the file again.'], drain: true);
 
             return;
         }
 
-        $max = $this->connections->getBridgeInfo($userId)['attachment_limits']['max_file_bytes'] ?? null;
+        $max = $this->connections->reachableBridgeInfo($userId)['attachment_limits']['max_file_bytes'] ?? null;
         if (is_int($max) && $size > $max) {
             self::answer($worker, 413, ['ok' => false, 'code' => 'upload_too_large', 'error' => sprintf(
                 'That file is %s, and this machine accepts at most %s per file (its --attachment-max-mb setting).',
@@ -195,10 +197,15 @@ final class TransferHub
             $this->guard(fn () => $this->uploadWorkerGone($id));
         });
 
-        $this->arm($id, 'upload', self::PICKUP_SECONDS, 504, 'pickup_timeout',
-            'The machine did not come to collect the file within '.self::PICKUP_SECONDS.'s. Check that its bridge can reach this server over HTTPS, then add the file again.');
+        // The pickup clock starts when the offer is written: at once, or after a short drop.
+        $armPickup = function () use ($id): void {
+            if (isset($this->uploads[$id])) {
+                $this->arm($id, 'upload', self::PICKUP_SECONDS, 504, 'pickup_timeout',
+                    'The machine did not come to collect the file within '.self::PICKUP_SECONDS.'s. Check that its bridge can reach this server over HTTPS, then add the file again.');
+            }
+        };
 
-        $sent = $this->connections->sendToUser($userId, array_filter([
+        $sent = $this->connections->sendOrHold($userId, array_filter([
             'type' => MessageTypes::UPLOAD_OFFER,
             'id' => $id,
             'url' => self::transferUrl($id),
@@ -206,7 +213,7 @@ final class TransferHub
             'name' => $name,
             'mime_type' => $mime !== '' ? $mime : null,
             'size' => $size,
-        ], static fn ($v) => $v !== null));
+        ], static fn ($v) => $v !== null), $armPickup);
 
         if (! $sent) {
             $this->failUpload($id, 502, 'not_connected', 'The machine could not be told about the file.', false);
@@ -278,7 +285,9 @@ final class TransferHub
 
         $u['bridge']->end();
 
-        $this->connections->sendToUser($u['user_id'], [
+        // Held through a short drop: the bytes went on their own connection, and the machine
+        // still needs this to check and keep them.
+        $this->connections->sendOrHold($u['user_id'], [
             'type' => MessageTypes::UPLOAD_SENT,
             'id' => $id,
             'size' => $u['passed'],
@@ -467,13 +476,13 @@ final class TransferHub
             return;
         }
 
-        if (! $this->connections->hasConnection($userId)) {
+        if (! $this->connections->canReach($userId)) {
             self::answer($worker, 409, ['ok' => false, 'code' => 'not_connected', 'error' => 'This file is only on the machine, and the machine is not connected.']);
 
             return;
         }
 
-        if (! $this->connections->bridgeSupports($userId, 'file_downloads')) {
+        if (! $this->connections->reachableBridgeSupports($userId, 'file_downloads')) {
             self::answer($worker, 409, ['ok' => false, 'code' => 'unsupported', 'error' => 'The bridge on this machine is too old to hand files back. Update it there, then try again.']);
 
             return;
@@ -497,17 +506,21 @@ final class TransferHub
             $this->guard(fn () => $this->downloadWorkerGone($id));
         });
 
-        $this->arm($id, 'download', self::ANSWER_SECONDS, 504, 'no_answer',
-            'The machine did not answer about the file within '.self::ANSWER_SECONDS.'s.');
+        $armAnswer = function () use ($id): void {
+            if (isset($this->downloads[$id])) {
+                $this->arm($id, 'download', self::ANSWER_SECONDS, 504, 'no_answer',
+                    'The machine did not answer about the file within '.self::ANSWER_SECONDS.'s.');
+            }
+        };
 
-        $sent = $this->connections->sendToUser($userId, array_filter([
+        $sent = $this->connections->sendOrHold($userId, array_filter([
             'type' => MessageTypes::FILE_READ,
             'id' => $id,
             'file_id' => $fileId,
             'url' => self::transferUrl($id),
             'range' => is_string($range) && $range !== '' ? $range : null,
             'head' => $head ? true : null,
-        ], static fn ($v) => $v !== null));
+        ], static fn ($v) => $v !== null), $armAnswer);
 
         if (! $sent) {
             $this->failDownload($id, 502, 'not_connected', 'The machine could not be asked for the file.', false);
@@ -786,7 +799,11 @@ final class TransferHub
         }
     }
 
-    /** A user's machine went away: every transfer of theirs ends now rather than on a timer. */
+    /**
+     * A user's machine went away: every transfer of theirs ends now rather than on a timer.
+     * For a `reliable_delivery` machine on a short drop this is when the grace period ends
+     * without it; until then its transfers carry on (their bytes have their own connections).
+     */
     public function userGone(string $userId): void
     {
         $this->guard(function () use ($userId): void {

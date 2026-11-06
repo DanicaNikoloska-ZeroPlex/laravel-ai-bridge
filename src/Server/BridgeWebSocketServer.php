@@ -114,7 +114,8 @@ class BridgeWebSocketServer
         }
 
         // Short drops (bridge `reliable_delivery`): send the stream_acks a throttle held back,
-        // and fail the detached turns whose bridge did not come back within the grace period.
+        // fail the detached turns (and the work held for the machine) whose bridge did not
+        // come back within the grace period, and send what was held for one that did.
         // Both live only in this process, so this is where they are kept to time.
         $this->loop->addPeriodicTimer(1.0, fn () => $this->tickReliableDelivery());
 
@@ -134,6 +135,7 @@ class BridgeWebSocketServer
         try {
             $this->messageHandler->flushStreamAcks();
             $this->connectionManager->expireDetachedRequests();
+            $this->connectionManager->flushAllHeldFrames();
         } catch (\Throwable $e) {
             BridgeLog::error('reliable delivery tick failed', ['error' => $e->getMessage()]);
         }
@@ -293,12 +295,12 @@ class BridgeWebSocketServer
 
         // Guard against duplicate onClose calls (close frame + TCP close event)
         $closed = false;
-        $doClose = function () use ($handler, &$bridgeConnection, &$closed) {
+        $doClose = function (?int $closeCode = null) use ($handler, &$bridgeConnection, &$closed) {
             if ($closed) {
                 return;
             }
             $closed = true;
-            $handler->onClose($bridgeConnection);
+            $handler->onClose($bridgeConnection, $closeCode);
         };
 
         // Create a BridgeConnection wrapper with a send callback that encodes
@@ -333,7 +335,9 @@ class BridgeWebSocketServer
                         $tcpConnection->write(
                             (new Frame($frame->getPayload(), opcode: Frame::OP_CLOSE))->getContents()
                         );
-                        $doClose();
+                        // The code the bridge closed with: 1000 is a deliberate stop.
+                        $payload = $frame->getPayload();
+                        $doClose(strlen($payload) >= 2 ? unpack('n', $payload)[1] : null);
                         $tcpConnection->end();
                     })(),
                     default => null,
@@ -349,7 +353,7 @@ class BridgeWebSocketServer
         $tcpConnection->on('data', [$messageBuffer, 'onData']);
 
         // Handle TCP connection close (e.g. client disconnects without close frame)
-        $tcpConnection->on('close', $doClose);
+        $tcpConnection->on('close', fn () => $doClose());
 
         // Handle TCP errors
         $tcpConnection->on('error', function (\Exception $e) use ($handler, $bridgeConnection) {
@@ -640,7 +644,9 @@ class BridgeWebSocketServer
             return;
         }
 
-        if (! $this->connectionManager->hasConnection($userId)) {
+        // A machine on a short drop (reliable_delivery) counts as connected: the question
+        // waits for the reconnect, within the grace period (PROTOCOL.md, "Short drops").
+        if (! $this->connectionManager->canReach($userId)) {
             $this->httpResponse($tcpConnection, 404, [
                 'error' => 'bridge_not_connected',
                 'message' => 'No bridge is connected for this user.',
@@ -652,30 +658,62 @@ class BridgeWebSocketServer
         $requestId = 'usage-'.bin2hex(random_bytes(8));
         $answered = false;
 
-        $this->connectionManager->registerPendingUsage(
-            $requestId,
-            $userId,
-            function (array $answer) use (&$answered, $tcpConnection): void {
-                if ($answered) {
-                    return;
-                }
-
-                $answered = true;
-                $this->httpResponse($tcpConnection, 200, $answer);
-            }
-        );
-
         // Which CLI to report on. Optional, but a machine can have several installed and only
         // the caller knows which one is answering the conversation; without it the bridge
         // refuses to guess rather than label one subscription's figures as another's.
         parse_str((string) $request->getUri()->getQuery(), $query);
         $provider = isset($query['provider']) && is_string($query['provider']) ? $query['provider'] : null;
 
-        $sent = $this->connectionManager->sendToUser($userId, [
+        $frame = [
             'type' => MessageTypes::USAGE_REQUEST,
             'id' => $requestId,
             ...($provider !== null && $provider !== '' ? ['provider' => $provider] : []),
-        ]);
+        ];
+
+        // Without this the response is held open forever by a bridge that will never reply,
+        // and the asker's own request eventually dies with no explanation. Started each time
+        // the question is written, so a wait for a reconnect does not count against it; while
+        // the machine is away the clock does not end it (the grace period does).
+        $timeout = (float) config('ai-bridge.server.usage_timeout', 12);
+        $timer = null;
+        $armTimer = function () use ($requestId, $userId, $timeout, &$answered, &$timer, $tcpConnection): void {
+            if ($timer !== null) {
+                $this->loop->cancelTimer($timer);
+            }
+
+            $timer = $this->loop->addTimer($timeout, function () use ($requestId, $userId, &$answered, $tcpConnection): void {
+                if ($answered || $this->connectionManager->isAwaitingReconnect($userId)) {
+                    return;
+                }
+
+                $this->connectionManager->forgetPendingUsage($requestId);
+                $answered = true;
+                $this->httpResponse($tcpConnection, 504, [
+                    'error' => 'bridge_did_not_answer',
+                    'message' => 'The bridge did not answer in time. It may be an older version that does not know the question.',
+                ]);
+            });
+        };
+
+        $this->connectionManager->registerPendingUsage(
+            $requestId,
+            $userId,
+            function (array $answer) use (&$answered, &$timer, $tcpConnection): void {
+                if ($answered) {
+                    return;
+                }
+
+                $answered = true;
+                if ($timer !== null) {
+                    $this->loop->cancelTimer($timer);
+                }
+                $this->httpResponse($tcpConnection, 200, $answer);
+            },
+            $frame,
+            $armTimer,
+        );
+
+        $sent = $this->connectionManager->sendOrHold($userId, $frame, $armTimer, BridgeConnectionManager::usageHoldKey($requestId));
 
         if (! $sent) {
             $this->connectionManager->forgetPendingUsage($requestId);
@@ -683,27 +721,7 @@ class BridgeWebSocketServer
                 'error' => 'send_failed',
                 'message' => 'Could not put the question to the bridge.',
             ]);
-
-            return;
         }
-
-        // Without this the response is held open forever by a bridge that will never reply,
-        // and the asker's own request eventually dies with no explanation.
-        $timeout = (float) config('ai-bridge.server.usage_timeout', 12);
-
-        $this->loop->addTimer($timeout, function () use ($requestId, &$answered, $tcpConnection): void {
-            $this->connectionManager->forgetPendingUsage($requestId);
-
-            if ($answered) {
-                return;
-            }
-
-            $answered = true;
-            $this->httpResponse($tcpConnection, 504, [
-                'error' => 'bridge_did_not_answer',
-                'message' => 'The bridge did not answer in time. It may be an older version that does not know the question.',
-            ]);
-        });
     }
 
     /**
@@ -721,6 +739,9 @@ class BridgeWebSocketServer
      *    new turn with the message, which is what that reason means.
      *  - `no_answer` — the bridge did not answer in time, or disconnected first. It may or
      *    may not have taken the message, so this must never read as `turn_not_running`.
+     *  - `connection_lost` — a `reliable_delivery` bridge dropped and did not come back within
+     *    the grace period (its turn has ended too). Until then the message waits for the
+     *    reconnect and is sent, or sent again, after it; the bridge takes a message_id once.
      *  - `duplicate` — the same message is already waiting on its answer; sending it again
      *    would write it to the CLI twice.
      *  - `send_failed` — the frame could not be written to the bridge's socket.
@@ -814,28 +835,65 @@ class BridgeWebSocketServer
 
         $answered = false;
 
+        $frame = [
+            'type' => MessageTypes::TURN_INPUT,
+            'request_id' => $requestId,
+            'message_id' => $messageId,
+            'content' => $text,
+        ];
+
+        // A bridge too old to know turn_input never answers. It also never confirms
+        // `input_open`, so a well-behaved caller does not get here with one — but a caller
+        // that does must not be held open for ever. Started each time the frame is written,
+        // and not ended by the clock while a reliable_delivery machine is away on a short
+        // drop: the message waits for the reconnect, within the grace period.
+        $timeout = (float) config('ai-bridge.server.turn_input_timeout', 5);
+        $timer = null;
+        $armTimer = function () use ($requestId, $messageId, $userId, $timeout, &$answered, &$timer, $tcpConnection): void {
+            if ($answered) {
+                return;
+            }
+
+            if ($timer !== null) {
+                $this->loop->cancelTimer($timer);
+            }
+
+            $timer = $this->loop->addTimer($timeout, function () use ($requestId, $messageId, $userId, &$answered, $tcpConnection): void {
+                if ($answered || $this->connectionManager->isAwaitingReconnect($userId)) {
+                    return;
+                }
+
+                $this->connectionManager->forgetPendingTurnInput($requestId, $messageId);
+                $answered = true;
+                $this->httpResponse($tcpConnection, 200, [
+                    'status' => 'rejected',
+                    'reason' => 'no_answer',
+                ]);
+            });
+        };
+
         // Registered BEFORE sending, as apiRequest() registers its turn: a bridge on the same
         // host can acknowledge before sendToUser() has even returned.
         $this->connectionManager->registerPendingTurnInput(
             $requestId,
             $messageId,
             $userId,
-            function (array $answer) use (&$answered, $tcpConnection): void {
+            function (array $answer) use (&$answered, &$timer, $tcpConnection): void {
                 if ($answered) {
                     return;
                 }
 
                 $answered = true;
+                if ($timer !== null) {
+                    $this->loop->cancelTimer($timer);
+                }
                 $this->httpResponse($tcpConnection, 200, $answer);
-            }
+            },
+            $frame,
+            $armTimer,
         );
 
-        $sent = $this->connectionManager->sendToUser($userId, [
-            'type' => MessageTypes::TURN_INPUT,
-            'request_id' => $requestId,
-            'message_id' => $messageId,
-            'content' => $text,
-        ]);
+        $sent = $this->connectionManager->sendOrHold($userId, $frame, $armTimer, BridgeConnectionManager::turnInputHoldKey($requestId, $messageId));
 
         if (! $sent) {
             $this->connectionManager->forgetPendingTurnInput($requestId, $messageId);
@@ -847,32 +905,7 @@ class BridgeWebSocketServer
                     'reason' => 'send_failed',
                 ]);
             }
-
-            return;
         }
-
-        if ($answered) {
-            return;
-        }
-
-        // A bridge too old to know turn_input never answers. It also never confirms
-        // `input_open`, so a well-behaved caller does not get here with one — but a caller
-        // that does must not be held open for ever.
-        $timeout = (float) config('ai-bridge.server.turn_input_timeout', 5);
-
-        $this->loop->addTimer($timeout, function () use ($requestId, $messageId, &$answered, $tcpConnection): void {
-            $this->connectionManager->forgetPendingTurnInput($requestId, $messageId);
-
-            if ($answered) {
-                return;
-            }
-
-            $answered = true;
-            $this->httpResponse($tcpConnection, 200, [
-                'status' => 'rejected',
-                'reason' => 'no_answer',
-            ]);
-        });
     }
 
     /**
@@ -1314,13 +1347,15 @@ class BridgeWebSocketServer
             return null;
         }
 
-        if (! $this->connectionManager->hasConnection($userId)) {
+        // A machine on a short drop (reliable_delivery) counts as connected, with what it said
+        // at its last hello: the exchange waits for the reconnect (see awaitBridge()).
+        if (! $this->connectionManager->canReach($userId)) {
             $this->httpResponse($tcpConnection, 404, ['ok' => false, 'code' => 'not_connected', 'error' => 'No bridge is connected for this connection.']);
 
             return null;
         }
 
-        if (! is_array($this->connectionManager->getBridgeInfo($userId)[$needs] ?? null)) {
+        if (! is_array($this->connectionManager->reachableBridgeInfo($userId)[$needs] ?? null)) {
             $this->httpResponse($tcpConnection, 409, [
                 'ok' => false,
                 'code' => $needs.'_unsupported',
@@ -1337,6 +1372,11 @@ class BridgeWebSocketServer
      * Send a frame and hold the HTTP response open until the bridge answers under `$key`,
      * the bridge drops (404 `not_connected`), or `$timeout` seconds pass (504 with
      * `$timeoutAnswer`). A second waiter on a key already out is not sent again.
+     *
+     * While a `reliable_delivery` machine is away on a short drop the frame is held and sent
+     * after the reconnect, and `$timeout` starts then; it fails with `not_connected` only when
+     * the grace period ends. One already out when the machine drops fails at once: it may
+     * have run, and is not sent twice.
      *
      * Registered BEFORE sending, as apiRequestInput() does: a bridge on the same host can
      * answer before sendToUser() has returned.
@@ -1364,21 +1404,28 @@ class BridgeWebSocketServer
             '_status' => 404,
         ]);
 
-        if ($first && ! $this->connectionManager->sendToUser($userId, $frame)) {
+        $armTimer = function () use (&$answered, $key, $respond, $timeout, $timeoutAnswer): void {
+            if ($answered) {
+                return;
+            }
+
+            $this->loop?->addTimer($timeout, function () use ($key, $respond, $timeoutAnswer): void {
+                $this->connectionManager->forgetPendingExchange($key, $respond);
+                $respond($timeoutAnswer + ['_status' => 504]);
+            });
+        };
+
+        if (! $first) {
+            // The frame is already out (or held) for the first waiter on this key.
+            $armTimer();
+
+            return;
+        }
+
+        if (! $this->connectionManager->sendOrHold($userId, $frame, $armTimer)) {
             $this->connectionManager->forgetPendingExchange($key, $respond);
             $respond(['ok' => false, 'code' => 'send_failed', 'error' => 'Could not write to the bridge.', '_status' => 502]);
-
-            return;
         }
-
-        if ($answered) {
-            return;
-        }
-
-        $this->loop?->addTimer($timeout, function () use ($key, $respond, $timeoutAnswer): void {
-            $this->connectionManager->forgetPendingExchange($key, $respond);
-            $respond($timeoutAnswer + ['_status' => 504]);
-        });
     }
 
     /**

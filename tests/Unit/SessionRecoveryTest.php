@@ -341,3 +341,46 @@ test('session_lost re-issue keeps the relayed turn\'s bridge_prompt and open inp
         ->and($sent[0]['bridge_prompt'])->toBe(['mode' => 'append', 'text' => 'Be brief.'])
         ->and($sent[0]['options']['accepts_input'])->toBeTrue();
 });
+
+// --- D09710: a re-issued turn may number its frames from 1 again (#14262) ---
+
+test('after a numbered session_lost error, the re-issued turn\'s frames from seq 1 are stored, not dropped as seen', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0]);
+    $conversation = Conversation::create([
+        'mode' => 'bridge', 'provider' => 'claude', 'cli_session_id' => 'dead-sess',
+    ]);
+    $conversation->appendMessage(Message::ROLE_USER, 'I enter the cave');
+
+    $sent = [];
+    $manager = new BridgeConnectionManager();
+    $manager->setSendCallback(function ($connection, $payload) use (&$sent) {
+        $sent[] = $payload;
+
+        return true;
+    });
+    $handler = recoveryHandler((string) $conversation->id);
+    $deltas = [];
+    $handler->onBlockDelta(function ($event) use (&$deltas) {
+        $deltas[] = $event->data['content'];
+    });
+    $manager->addConnection('user-1', 'conn-1');
+    $manager->registerPendingRequest('req-1', $handler, 'user-1');
+    $mh = recoveryMessageHandler($manager);
+    $numbered = fn (int $seq, string $event, array $data) => json_encode([
+        'type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'seq' => $seq, 'event' => $event, 'data' => $data,
+    ]);
+    $delta = fn (string $c) => ['block_type' => 'text', 'block_index' => 0, 'content' => $c];
+
+    $mh->handleMessage('conn-1', null, $numbered(1, MessageTypes::BLOCK_DELTA, $delta('a')));
+    $mh->handleMessage('conn-1', null, $numbered(2, MessageTypes::ERROR, ['code' => 'session_lost', 'message' => 'cannot resume']));
+
+    // Re-issued under the same request id; the new turn numbers from 1.
+    expect($manager->getPendingRequest('req-1'))->not->toBeNull();
+    $mh->handleMessage('conn-1', null, $numbered(1, MessageTypes::BLOCK_DELTA, $delta('b')));
+    $mh->handleMessage('conn-1', null, $numbered(1, MessageTypes::BLOCK_DELTA, $delta('b')));
+    $mh->handleMessage('conn-1', null, $numbered(2, MessageTypes::BLOCK_DELTA, $delta('c')));
+
+    $acks = array_values(array_map(fn ($p) => $p['seq'], array_filter($sent, fn ($p) => $p['type'] === MessageTypes::STREAM_ACK)));
+    expect($deltas)->toBe(['a', 'b', 'c'])
+        ->and($acks)->toBe([1, 2, 1, 1, 2]);
+});

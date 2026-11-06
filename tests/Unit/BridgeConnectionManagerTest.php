@@ -544,14 +544,248 @@ test('acceptSeq stores only the next seq, drops duplicates and refuses gaps', fu
     reliableTurn($this->manager, 'req-1');
 
     expect($this->manager->acceptSeq('req-1', 2))->toBe(BridgeConnectionManager::SEQ_GAP)
-        ->and($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_STORE)
-        ->and($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_DUPLICATE)
-        ->and($this->manager->acceptSeq('req-1', 2))->toBe(BridgeConnectionManager::SEQ_STORE)
-        ->and($this->manager->lastStoredSeq('req-1'))->toBe(2)
+        ->and($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_STORE);
+    $this->manager->commitSeq('req-1', 1);
+    expect($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_DUPLICATE)
+        ->and($this->manager->acceptSeq('req-1', 2))->toBe(BridgeConnectionManager::SEQ_STORE);
+    $this->manager->commitSeq('req-1', 2);
+    expect($this->manager->lastStoredSeq('req-1'))->toBe(2)
         ->and($this->manager->acceptSeq('unknown', 1))->toBe(BridgeConnectionManager::SEQ_GAP);
 
     // A session_lost re-issue may number from 1 again.
     $this->manager->allowSeqRestart('req-1');
+    expect($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_STORE);
+    $this->manager->commitSeq('req-1', 1);
+    expect($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_DUPLICATE);
+});
+
+test('acceptSeq only judges a frame: until commitSeq it is not counted as stored', function () {
+    reliableTurn($this->manager, 'req-1');
+
     expect($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_STORE)
-        ->and($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_DUPLICATE);
+        ->and($this->manager->acceptSeq('req-1', 1))->toBe(BridgeConnectionManager::SEQ_STORE)
+        ->and($this->manager->lastStoredSeq('req-1'))->toBe(0);
+});
+
+// --- D09710 rework: what a drop keeps, and what it does not ---
+
+test('a reconnect that drops before its hello keeps the turns held for the earlier drop (#14258)', function () {
+    connectReliable($this->manager, 'conn-1');
+    $code = null;
+    reliableTurn($this->manager, 'req-1', $code);
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+
+    // The bridge reconnects, and that socket breaks before it said hello.
+    $this->manager->addConnection('user-1', 'conn-2');
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+
+    expect($code)->toBeNull()
+        ->and($this->manager->isDetached('req-1'))->toBeTrue()
+        ->and($this->manager->isAwaitingReconnect('user-1'))->toBeTrue();
+
+    connectReliable($this->manager, 'conn-3');
+    expect($this->manager->reattachRunningTurns('user-1', ['req-1']))->toBe(['reattached' => ['req-1'], 'failed' => []])
+        ->and($code)->toBeNull();
+});
+
+test('a deliberate close fails a reliable bridge\'s turns at once instead of detaching them (#14259, #14278)', function (string $how) {
+    connectReliable($this->manager, 'conn-1');
+    $code = null;
+    reliableTurn($this->manager, 'req-1', $code);
+    $gone = [];
+    $this->manager->onUserGone(function (string $u) use (&$gone) {
+        $gone[] = $u;
+    });
+
+    $how === 'revoked'
+        ? $this->manager->disconnectUser('user-1')
+        : $this->manager->removeConnection('user-1', 'bridge_shutdown');
+
+    expect($code)->toBe('bridge_disconnected')
+        ->and($this->manager->getPendingRequest('req-1'))->toBeNull()
+        ->and($this->manager->isAwaitingReconnect('user-1'))->toBeFalse()
+        ->and($gone)->toBe(['user-1']);
+    Event::assertNotDispatched(TurnLostAfterDrop::class);
+})->with(['revoked', 'bridge shut down with a normal close']);
+
+test('a deliberate close while an earlier drop is waited out fails the detached turns too', function () {
+    connectReliable($this->manager, 'conn-1');
+    $code = null;
+    reliableTurn($this->manager, 'req-1', $code);
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+    $this->manager->addConnection('user-1', 'conn-2');
+
+    $this->manager->disconnectUser('user-1');
+
+    expect($code)->toBe('bridge_disconnected')
+        ->and($this->manager->isAwaitingReconnect('user-1'))->toBeFalse();
+});
+
+test('a turn lost after a drop says why, in plain words, per reason (#14263)', function (string $reason, string $expected) {
+    config(['ai-bridge.websocket.reconnect_grace_seconds' => 120]);
+    connectReliable($this->manager, 'conn-1');
+    $handler = reliableTurn($this->manager, 'req-1');
+    $message = null;
+    $handler->onError(function (string $code, string $text) use (&$message) {
+        $message = $text;
+    });
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+
+    if ($reason === TurnLostAfterDrop::NOT_LISTED) {
+        connectReliable($this->manager, 'conn-2');
+        $this->manager->reattachRunningTurns('user-1', []);
+    } else {
+        $this->manager->expireDetachedRequests(time() + 121);
+    }
+
+    expect($message)->toBe($expected);
+})->with([
+    'not listed after the reconnect' => [TurnLostAfterDrop::NOT_LISTED, 'The connection to your machine dropped. It came back, but it was no longer working on this reply (it may have restarted), so the reply stopped here and the rest of it was not saved. Send your message again to continue.'],
+    'not back in time' => [TurnLostAfterDrop::GRACE_EXPIRED, 'The connection to your machine dropped and it did not come back within 120 seconds, so the reply stopped here and the rest of it was not saved. Send your message again to continue.'],
+]);
+
+test('the finished-turn memory keeps the newest 500 turns (#14262)', function () {
+    for ($i = 1; $i <= 501; $i++) {
+        $this->manager->rememberFinishedRequest("req-{$i}", 'user-1', $i);
+    }
+
+    expect($this->manager->finishedRequestSeq('req-1', 'user-1'))->toBeNull()
+        ->and($this->manager->finishedRequestSeq('req-2', 'user-1'))->toBe(2)
+        ->and($this->manager->finishedRequestSeq('req-501', 'user-1'))->toBe(501)
+        ->and($this->manager->finishedRequestSeq('req-501', 'user-2'))->toBeNull();
+});
+
+/** A reliable bridge of user-1 that records what is written to it. */
+function heldRig(object $test): object
+{
+    $rig = new stdClass();
+    $rig->sent = [];
+    $test->manager->setSendCallback(function ($c, array $payload) use ($rig): bool {
+        $rig->sent[] = $payload;
+
+        return true;
+    });
+    connectReliable($test->manager, 'conn-1');
+
+    return $rig;
+}
+
+test('work for a machine on a short drop is held and sent after its next hello (#14256)', function () {
+    $rig = heldRig($this);
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+    $sentAt = [];
+
+    expect($this->manager->canReach('user-1'))->toBeTrue()
+        ->and($this->manager->reachableBridgeSupports('user-1', 'reliable_delivery'))->toBeTrue()
+        ->and($this->manager->sendOrHold('user-1', ['type' => 'usage_request', 'id' => 'u-1'], function () use (&$sentAt) {
+            $sentAt[] = 'u-1';
+        }))->toBeTrue()
+        ->and($rig->sent)->toBe([]);
+
+    // Reconnected, but not until the hello has been answered.
+    connectReliable($this->manager, 'conn-2');
+    expect($this->manager->flushHeldFrames('user-1'))->toBe(0);
+    $this->manager->reattachRunningTurns('user-1', []);
+
+    expect($this->manager->flushHeldFrames('user-1'))->toBe(1)
+        ->and($rig->sent)->toBe([['type' => 'usage_request', 'id' => 'u-1']])
+        ->and($sentAt)->toBe(['u-1'])
+        ->and($this->manager->flushHeldFrames('user-1'))->toBe(0);
+
+    // Connected again: sent straight away.
+    $this->manager->sendOrHold('user-1', ['type' => 'turn_input', 'request_id' => 'r', 'message_id' => 'm']);
+    expect($rig->sent)->toHaveCount(2);
+});
+
+test('a usage question and a mid-turn message already out are put again after the reconnect, not failed (#14256, #14274)', function () {
+    $rig = heldRig($this);
+    $answers = [];
+    $usageFrame = ['type' => 'usage_request', 'id' => 'u-1'];
+    $inputFrame = ['type' => 'turn_input', 'request_id' => 'req-1', 'message_id' => 'm-1', 'content' => 'hi'];
+    $this->manager->registerPendingUsage('u-1', 'user-1', function (array $a) use (&$answers) {
+        $answers[] = $a;
+    }, $usageFrame);
+    $this->manager->registerPendingTurnInput('req-1', 'm-1', 'user-1', function (array $a) use (&$answers) {
+        $answers[] = $a;
+    }, $inputFrame);
+
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+    expect($answers)->toBe([]);
+
+    connectReliable($this->manager, 'conn-2');
+    $this->manager->reattachRunningTurns('user-1', []);
+    $this->manager->flushHeldFrames('user-1');
+
+    expect($rig->sent)->toBe([$usageFrame, $inputFrame])
+        ->and($this->manager->hasPendingTurnInput('req-1', 'm-1'))->toBeTrue();
+
+    $this->manager->resolvePendingTurnInput('req-1', 'm-1', 'user-1', ['status' => 'accepted']);
+    expect($answers)->toBe([['status' => 'accepted']]);
+});
+
+test('an exchange already out when the machine drops fails at once; one asked during the drop waits', function () {
+    $rig = heldRig($this);
+    $answers = [];
+    $this->manager->registerPendingExchange('mcp:1', 'user-1', function (array $a) use (&$answers) {
+        $answers['mcp:1'] = $a;
+    }, ['ok' => false, 'code' => 'not_connected']);
+
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+    expect($answers)->toBe(['mcp:1' => ['ok' => false, 'code' => 'not_connected']]);
+
+    $this->manager->registerPendingExchange('mcp:2', 'user-1', function (array $a) use (&$answers) {
+        $answers['mcp:2'] = $a;
+    }, ['ok' => false, 'code' => 'not_connected']);
+    $this->manager->sendOrHold('user-1', ['type' => 'mcp_request', 'id' => '2']);
+
+    expect($answers)->not->toHaveKey('mcp:2')
+        ->and($this->manager->hasPendingExchange('mcp:2'))->toBeTrue();
+});
+
+test('when the grace period ends without the machine, everything that waited fails, and only then (#14256)', function () {
+    config(['ai-bridge.websocket.reconnect_grace_seconds' => 120]);
+    heldRig($this);
+    $answers = [];
+    $gone = [];
+    $this->manager->onUserGone(function (string $u) use (&$gone) {
+        $gone[] = $u;
+    });
+    $this->manager->registerPendingUsage('u-1', 'user-1', function (array $a) use (&$answers) {
+        $answers['usage'] = $a;
+    }, ['type' => 'usage_request', 'id' => 'u-1']);
+    $this->manager->registerPendingTurnInput('req-1', 'm-1', 'user-1', function (array $a) use (&$answers) {
+        $answers['input'] = $a;
+    }, ['type' => 'turn_input', 'request_id' => 'req-1', 'message_id' => 'm-1', 'content' => 'hi']);
+
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+    $this->manager->registerPendingExchange('mcp:2', 'user-1', function (array $a) use (&$answers) {
+        $answers['mcp'] = $a;
+    }, ['ok' => false, 'code' => 'not_connected']);
+    $this->manager->sendOrHold('user-1', ['type' => 'mcp_request', 'id' => '2']);
+
+    $this->manager->expireDetachedRequests(time() + 119);
+    expect($answers)->toBe([])->and($gone)->toBe([]);
+
+    $this->manager->expireDetachedRequests(time() + 121);
+    expect($answers)->toBe([
+        'usage' => ['ok' => false, 'reason' => 'not_connected'],
+        'input' => ['status' => 'rejected', 'reason' => 'connection_lost'],
+        'mcp' => ['ok' => false, 'code' => 'not_connected'],
+    ])
+        ->and($gone)->toBe(['user-1'])
+        ->and($this->manager->canReach('user-1'))->toBeFalse()
+        ->and($this->manager->sendOrHold('user-1', ['type' => 'usage_request', 'id' => 'u-2']))->toBeFalse();
+});
+
+test('an old bridge dropping still fails a mid-turn message with no_answer at once', function () {
+    $this->manager->addConnection('user-1', 'conn-1');
+    $answer = null;
+    $this->manager->registerPendingTurnInput('req-1', 'm-1', 'user-1', function (array $a) use (&$answer) {
+        $answer = $a;
+    }, ['type' => 'turn_input', 'request_id' => 'req-1', 'message_id' => 'm-1', 'content' => 'hi']);
+
+    $this->manager->removeConnection('user-1', 'websocket_closed');
+
+    expect($answer)->toBe(['status' => 'rejected', 'reason' => 'no_answer'])
+        ->and($this->manager->canReach('user-1'))->toBeFalse();
 });

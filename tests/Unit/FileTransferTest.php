@@ -546,3 +546,74 @@ it('asks the bridge to keep handed-back files on the machine only when configure
     config()->set('ai-bridge.transfers.handed_back', 'device');
     expect($welcome()['config']['attachments'])->toBe('device');
 });
+
+// --- D09710 rework: a file hand-over waits out a short drop (#14256) ---------------
+
+/** transferRig() whose user-1 bridge announced reliable_delivery. */
+function reliableTransferRig(): object
+{
+    $rig = transferRig();
+    $rig->manager->setBridgeInfo('user-1', MessageHandler::bridgeInfoFromHello([
+        'file_uploads' => true, 'file_downloads' => true, 'capabilities' => ['reliable_delivery' => true],
+        'attachment_limits' => ['max_file_bytes' => 1000, 'max_total_bytes' => 5000, 'max_count' => 5],
+    ]));
+
+    return $rig;
+}
+
+function reconnectMachine(object $rig): void
+{
+    $rig->manager->addConnection('user-1', 'conn-1b', 'sock-1b');
+    $rig->manager->reattachRunningTurns('user-1', []);
+    $rig->manager->flushHeldFrames('user-1');
+}
+
+it('keeps an upload going through a short drop, and still tells the machine what passed', function () {
+    $rig = reliableTransferRig();
+    $worker = startUpload($rig, 3);
+    $id = frame($rig, MessageTypes::UPLOAD_OFFER)['id'];
+    $machine = machineGets($rig, $id);
+
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $worker->emit('data', ['abc']);
+
+    expect($worker->written)->toBe('')
+        ->and($rig->hub->inFlight())->toBe(1)
+        ->and($machine->response()[2])->toBe('abc')
+        ->and(frame($rig, MessageTypes::UPLOAD_SENT))->toBeNull();
+
+    reconnectMachine($rig);
+
+    expect(frame($rig, MessageTypes::UPLOAD_SENT)['id'])->toBe($id);
+});
+
+it('offers an upload started during a short drop once the machine is back, and starts the pickup clock then', function () {
+    $rig = reliableTransferRig();
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+
+    $worker = startUpload($rig, 3);
+    $uploads = new ReflectionProperty(TransferHub::class, 'uploads');
+    $id = array_key_first($uploads->getValue($rig->hub));
+
+    expect($worker->written)->toBe('')
+        ->and(frame($rig, MessageTypes::UPLOAD_OFFER))->toBeNull()
+        ->and($uploads->getValue($rig->hub)[$id]['timer'])->toBeNull();
+
+    reconnectMachine($rig);
+
+    expect(frame($rig, MessageTypes::UPLOAD_OFFER)['id'])->toBe($id)
+        ->and($uploads->getValue($rig->hub)[$id]['timer'])->not->toBeNull();
+});
+
+it('ends the transfers of a machine that does not come back within the grace period', function () {
+    config()->set('ai-bridge.websocket.reconnect_grace_seconds', 120);
+    $rig = reliableTransferRig();
+    $worker = startUpload($rig, 3);
+
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    expect($worker->written)->toBe('');
+
+    $rig->manager->expireDetachedRequests(time() + 121);
+
+    expect($worker->json()['code'])->toBe('machine_gone')->and($rig->hub->inFlight())->toBe(0);
+});

@@ -1115,14 +1115,19 @@ class MessageHandler
      * A numbered `stream` frame (bridge `reliable_delivery`, PROTOCOL.md "Short drops").
      *
      * Stored only when its `seq` is exactly one more than the last stored for the turn
-     * (BridgeConnectionManager::acceptSeq()). A re-send of a frame already stored is dropped
-     * and confirmed again; a frame after a gap is dropped without a confirmation, and the
-     * bridge re-sends from the last confirmed one after it reconnects. What was stored is
-     * confirmed with a cumulative `stream_ack` (see ackStream()).
+     * (BridgeConnectionManager::acceptSeq()), and counted as stored only once it has been
+     * processed without an error (commitSeq()): a frame lost to an error is stored when the
+     * bridge re-sends it, instead of being dropped as a duplicate. A re-send of a frame
+     * already stored is dropped and confirmed again; a frame after a gap is dropped without
+     * a confirmation, and the bridge re-sends from the last confirmed one after it
+     * reconnects. What was stored is confirmed with a cumulative `stream_ack` (ackStream()).
      *
-     * A frame for a request this server does not hold, or from a user that does not own it,
-     * goes the usual way (and is refused or settled there), except the re-sent final frame of
-     * a turn that has already ended here, which is confirmed again so the bridge can let go.
+     * A frame for a turn this server does not hold (it ended, it was never known here, or it
+     * is beyond the finished-turn memory) is answered with `stream_ack` `closed: true` and
+     * that frame's own `seq`, so the bridge can let go of the turn. It is then routed the
+     * usual way (which settles an orphaned final frame), except the re-sent final frame of a
+     * turn that ended normally here, which was settled already. A frame for a turn another
+     * user holds is routed the usual way, where it is refused.
      *
      * @param  array<string, mixed>  $message
      */
@@ -1130,15 +1135,21 @@ class MessageHandler
     {
         $senderUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
 
-        if ($senderUserId === null || $this->connectionManager->getPendingRequestUserId($requestId) !== $senderUserId) {
-            $finalSeq = $senderUserId === null ? null : $this->connectionManager->finishedRequestSeq($requestId, $senderUserId);
+        if ($senderUserId === null) {
+            return $this->routeStreamEvent($connectionId, $message);
+        }
 
-            if ($finalSeq !== null) {
-                $this->ackStream($senderUserId, $requestId, $finalSeq, true);
+        if ($this->connectionManager->getPendingRequest($requestId) === null) {
+            $this->sendClosedAck($senderUserId, $requestId, $seq);
 
+            if ($this->connectionManager->finishedRequestSeq($requestId, $senderUserId) !== null) {
                 return null;
             }
 
+            return $this->routeStreamEvent($connectionId, $message);
+        }
+
+        if ($this->connectionManager->getPendingRequestUserId($requestId) !== $senderUserId) {
             return $this->routeStreamEvent($connectionId, $message);
         }
 
@@ -1160,13 +1171,27 @@ class MessageHandler
             return null;
         }
 
+        // An exception leaves the frame uncounted (and is logged by the socket handler).
         $response = $this->routeStreamEvent($connectionId, $message);
+        $final = $eventType === MessageTypes::ERROR || $eventType === MessageTypes::DONE;
 
         if ($this->connectionManager->getPendingRequest($requestId) === null) {
-            // The turn ended with this frame (done, error, or a stop seen on it).
             $this->connectionManager->rememberFinishedRequest($requestId, $senderUserId, $seq);
-            $this->ackStream($senderUserId, $requestId, $seq, true);
-        } elseif ($eventType === MessageTypes::ERROR || $eventType === MessageTypes::DONE) {
+
+            if ($final) {
+                // The turn ended with its own final frame.
+                $this->ackStream($senderUserId, $requestId, $seq, true);
+            } else {
+                // The server ended it on this frame (a stop seen on it): over on this side.
+                $this->sendClosedAck($senderUserId, $requestId, $seq);
+            }
+
+            return $response;
+        }
+
+        $this->connectionManager->commitSeq($requestId, $seq);
+
+        if ($final) {
             // Still pending after a final frame: a session_lost re-issue, which runs on under
             // the same request id and may number its frames from 1 again.
             $this->connectionManager->allowSeqRestart($requestId);
@@ -1260,6 +1285,27 @@ class MessageHandler
     }
 
     /**
+     * Tell a `reliable_delivery` bridge a turn is over on this side:
+     * `{"type": "stream_ack", "request_id", "seq", "closed": true}`. The bridge drops what it
+     * keeps of the turn and stops it if it still runs it (PROTOCOL.md, "Short drops").
+     *
+     * Sent when the server ends a turn itself while the bridge is attached (a stop), and in
+     * answer to any numbered frame of a turn the server does not hold: only a bridge with the
+     * capability numbers its frames, or is sent this (see handleUserAbort()).
+     */
+    private function sendClosedAck(string $userId, string $requestId, int $seq): void
+    {
+        unset($this->owedAcks[$requestId], $this->lastAckAt[$requestId]);
+
+        $this->connectionManager->sendToUser($userId, [
+            'type' => MessageTypes::STREAM_ACK,
+            'request_id' => $requestId,
+            'seq' => $seq,
+            'closed' => true,
+        ]);
+    }
+
+    /**
      * Route one `stream` envelope to what handles its event.
      *
      * @param  array<string, mixed>  $message
@@ -1314,7 +1360,8 @@ class MessageHandler
         // cancelled terminal locally and send a cancel frame to the bridge so
         // the CLI exits. Polling here is cheap (one Redis EXISTS per event).
         if ($this->isAbortRequested($requestId)) {
-            $this->handleUserAbort($connectionId, $requestId, $handler);
+            // A numbered frame's handler confirms this frame itself, with `closed`.
+            $this->handleUserAbort($connectionId, $requestId, $handler, ! is_int($message['seq'] ?? null));
 
             return null;
         }
@@ -1453,11 +1500,12 @@ class MessageHandler
     /**
      * Dispatch a cancelled terminal locally and send a cancel frame to the bridge.
      *
-     * Called when an abort flag is observed mid-turn. Idempotent — the
+     * Called when an abort flag is observed mid-turn (on a heartbeat, or on a frame; a
+     * numbered frame's own handler then sends the `closed` stream_ack). Idempotent — the
      * StreamHandler guards against double-termination, and the bridge handles
      * a cancel for an already-terminated request gracefully.
      */
-    private function handleUserAbort(string $connectionId, string $requestId, StreamHandler $handler): void
+    private function handleUserAbort(string $connectionId, string $requestId, StreamHandler $handler, bool $sendClosedAck = true): void
     {
         BridgeLog::info('user-requested abort observed, cancelling turn', [
             'request_id' => $requestId,
@@ -1469,6 +1517,11 @@ class MessageHandler
                 'type' => MessageTypes::CANCEL,
                 'request_id' => $requestId,
             ]);
+
+            // The turn is over here: a reliable bridge may let go of its frames (#14273).
+            if ($sendClosedAck && $this->connectionManager->bridgeSupports($userId, 'reliable_delivery')) {
+                $this->sendClosedAck($userId, $requestId, $this->connectionManager->lastStoredSeq($requestId));
+            }
         }
 
         $handler->dispatchCancelled('Cancelled by user.');
