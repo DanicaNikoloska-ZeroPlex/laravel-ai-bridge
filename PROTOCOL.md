@@ -114,6 +114,19 @@ The bridge implements exponential backoff reconnection:
 
 On reconnect, the bridge sends a new `hello` message. The server re-associates the connection with the user. The bridge holds no session state of its own — the server owns the `conversation_id → cli_session_id` mapping (see [Conversation Continuity](#conversation-continuity)), so a bridge restart loses nothing.
 
+### Short drops: reliable delivery (capability `reliable_delivery`)
+
+A bridge that sends `capabilities.reliable_delivery: true` in `hello` keeps its turns alive through a short drop and loses no output. A bridge without it behaves as described above, and the server treats it as before.
+
+- **Numbered frames.** Every `stream` frame of a turn carries `seq`: 1 for the first frame of that `request_id`, then +1 per frame, up to and including the `done` or `error` frame.
+- **Receipts.** The server confirms what it has stored with `{"type": "stream_ack", "request_id": "…", "seq": N}`, meaning "everything up to N arrived". It sends one at least every second while frames arrive, and always for the final frame.
+- **Kept until confirmed.** The bridge keeps every frame of a turn until a `stream_ack` covers it, and drops a turn's frames once its final frame is confirmed.
+- **The grace period.** On a drop the bridge does NOT stop its running turns. They keep working for `reconnect_grace_seconds` (from `welcome.config`, default 120), and their frames wait on the machine. A turn still unconfirmed when the grace period ends is stopped and reported as `bridge_disconnected`, as today.
+- **On the server side,** a turn of a `reliable_delivery` bridge whose connection drops is detached rather than failed. It stays pending for the same grace period and fails with `bridge_disconnected` only when the period ends without the bridge coming back.
+- **After reconnecting,** `hello` lists what is still running: `"running_turns": [{"request_id": "…", "last_acked_seq": N}]`. The server re-attaches each listed turn to the new connection; a detached turn the bridge does not list fails at once with `bridge_disconnected`. The bridge then re-sends every frame after `last_acked_seq` for each turn, including a final frame that was never confirmed.
+- **Duplicates are ignored.** The server stores a frame only when its `seq` is exactly one more than the last it stored for that turn, and drops any frame at or below it. Re-sending is therefore always safe.
+- **Steps that need the server during a drop** (a file hand-over, a `turn_input` from the person) wait for the reconnect instead of failing, within the grace period.
+
 ---
 
 ## Handshake
@@ -1170,6 +1183,8 @@ Every streaming event follows this structure:
   "data": {}
 }
 ```
+
+`seq` (integer, optional) numbers the frames of one turn, from 1. It is present only on bridges that announced `reliable_delivery`; see [Short drops](#short-drops-reliable-delivery-capability-reliable_delivery).
 
 ### Block Model
 
