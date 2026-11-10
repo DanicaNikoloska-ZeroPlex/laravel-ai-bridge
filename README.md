@@ -464,6 +464,8 @@ Full reference for `config/ai-bridge.php`:
 
 | `websocket.silence_timeout` | -- | `900` | Seconds a turn may produce **nothing** before the CLI is presumed wedged. This is the bound that stops a turn; `0` disables it. A long-running tool counts as silence — a `sleep 20` produces a 17-second gap — so this must exceed the longest build or test run you expect |
 | `websocket.request_timeout` | -- | `86400` | Wall-clock backstop for one turn, in seconds. `0` means no ceiling |
+| `websocket.reconnect_grace_seconds` | `AI_BRIDGE_RECONNECT_GRACE_SECONDS` | `120` | How long a turn of a `reliable_delivery` bridge survives a dropped connection (detached, waiting for the bridge to list it again) before it fails with `bridge_disconnected`. Sent as `welcome.config.reconnect_grace_seconds` |
+| `websocket.stream_ack_interval` | -- | `1` | Most seconds between two `stream_ack`s for a turn while its frames arrive; a final frame is confirmed at once. `0` confirms every frame |
 | `chat_completions.endpoint` | `AI_BRIDGE_ENDPOINT` | `null` | Chat Completions API base URL |
 | `chat_completions.api_key` | `AI_BRIDGE_API_KEY` | `null` | API key for BYOK/managed |
 | `chat_completions.model` | `AI_BRIDGE_MODEL` | `null` | Model name (e.g. `gpt-4o`) |
@@ -1385,6 +1387,16 @@ whether a message now is read straight away or after the current step. Both
 are buffered and replay by index (`onUserInput`, `onMainState` on a
 `StreamHandler`). A stopped turn lists the ids it never read in
 `pending_inputs` on `cancelled`. See `PROTOCOL.md`, "Turn Input".
+
+When a bridge with `reliable_delivery` drops for a moment, a `sendTurnInput()`
+(and a usage question, an upstream sign-in step or a file hand-over) waits for
+it to reconnect instead of failing, but never longer than its own timeout
+(`server.turn_input_timeout` for a message, counted from the call): a message
+still held then is dropped, never sent later, and answered `send_failed`. If the
+machine does not come back within `websocket.reconnect_grace_seconds`, the
+message is answered `connection_lost`: the turn has ended too. Either way, keep
+the message for the next turn rather than count it as delivered. See
+`PROTOCOL.md`, "Short drops".
 
 A bridge may close a turn's input before the turn ends (ai-bridge 0.25+,
 capability `input_closed`): the stream then carries `input_closed`

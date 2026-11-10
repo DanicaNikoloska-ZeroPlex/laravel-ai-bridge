@@ -24,6 +24,9 @@ namespace Tetrix\AiBridge\Streaming;
  *    has not started yet).
  *  - `no_answer` — the bridge did not answer in time, or went away. It may have taken the
  *    message; do not resend it as a new turn.
+ *  - `connection_lost` — a bridge with `reliable_delivery` dropped and did not come back
+ *    within the grace period, so its turn has ended too. Do not count the message as
+ *    delivered: keep it for the next turn. (Until then the message waits for the reconnect.)
  *  - `not_owner` — the turn belongs to another user.
  *  - `duplicate` — the same message id is still waiting on its answer.
  *  - `invalid_request` — the content had no text in it (turn input is text only; a list of

@@ -3,6 +3,60 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [Unreleased]
+
+### Added
+
+- **A reply survives a short drop (D09710, PROTOCOL.md "Short drops").** A bridge that sends
+  `capabilities.reliable_delivery: true` in `hello` numbers its `stream` frames (`seq`, 1.. per
+  `request_id`, final frame included). The server stores a frame only when its `seq` is one more
+  than the last stored for that turn, drops re-sends (and confirms them again), and does not store
+  a frame after a gap. What is stored is confirmed with `{"type": "stream_ack", "request_id", "seq"}`
+  (cumulative), at least every second while frames arrive (`websocket.stream_ack_interval`) and at
+  once for the final frame.
+- When such a bridge drops, its pending turns are **detached instead of failed** for
+  `websocket.reconnect_grace_seconds` (default 120, sent as `welcome.config.reconnect_grace_seconds`).
+  The next `hello` re-attaches the turns it lists in `running_turns`; a detached turn it does not list,
+  or one still detached when the period ends, fails with `bridge_disconnected` and fires the new
+  `Tetrix\AiBridge\Events\TurnLostAfterDrop` event (`reason` `not_listed` / `grace_expired`).
+  The serve process checks the deadline and flushes held-back acks on a one-second timer.
+- `stream_ack` with **`closed: true`**: the turn is over on the server's side, so the bridge lets go of
+  it (and stops it if it still runs). Sent when the server ends a turn itself while the bridge is
+  connected (a Stop, with the last stored `seq`), and in answer to every numbered frame of a turn the
+  server does not hold (ended, never known, or beyond the memory of the newest 500 finished turns),
+  with that frame's own `seq`.
+- **Work for the machine waits out a short drop** of a `reliable_delivery` bridge, within the grace
+  period: a usage question, a `turn_input`, an `mcp_request` or upstream sign-in step asked during the
+  drop is held and sent after the bridge's next `hello`; a usage question or `turn_input` already out is
+  sent again (a bridge takes a `message_id` once); a file hand-over in progress carries on (its bytes
+  have their own connection) and its frames due during the drop are held. A held item never outlives
+  its caller: a usage question, `turn_input` or exchange is held only until its own timeout, counted
+  from the request (each caller waits that plus 3 s); when it passes the frame is dropped, never sent
+  later, and the caller is answered as before the hold (usage 404 `bridge_not_connected`, an exchange
+  404 `not_connected`, a `turn_input` `send_failed`, or `no_answer` if it went out before the drop).
+  Two identical exchanges share one frame, each with its own clock. A file hand-over's clocks
+  (pickup, answer, upload confirm) start when its frame is written. When the grace period ends without the machine they fail as before, a
+  `turn_input` with the new reason **`connection_lost`** (its turn ended too; do not count the message
+  as delivered). An `mcp_request` or sign-in step already out still fails at once: it may have run.
+- A turn lost after a drop says why in its `bridge_disconnected` message: the machine came back
+  without the reply, or did not come back within the grace period.
+- A frame counts as stored only after it was processed without an error, so a frame lost to a
+  server-side error is stored when the bridge re-sends it instead of being dropped as a duplicate.
+- Only a transport-level drop detaches a `reliable_delivery` bridge's turns. A revoked connection
+  (`disconnectUser()`, close 4001) and a bridge that closes normally (1000, shutting down) fail them at
+  once. A reconnect that drops again before its `hello` keeps the turns of the earlier drop detached.
+- A tool call whose answer was lost in a drop is failed by the bridge, which never sends it again;
+  the server has no re-send handling for tool calls.
+- `BridgeConnectionManager::isDetached()`, `detachedRequestIdsForUser()`, `reattachRunningTurns()`,
+  `expireDetachedRequests()`, `acceptSeq()` / `commitSeq()`, `isAwaitingReconnect()`, `canReach()`,
+  `reachableBridgeInfo()`, `reachableBridgeSupports()`, `sendOrHold()`, `flushHeldFrames()`,
+  `isHeldFrame()`, `dropHeldFrame()`, `lostAfterDropMessage()`, `MessageTypes::STREAM_ACK`.
+
+### Unchanged
+
+- A bridge without `reliable_delivery` (no `seq`, no `running_turns`) behaves exactly as before: its
+  turns fail on the drop, and no `TurnLostAfterDrop` fires.
+
 ## [0.21.0] — 2026-10-16
 
 Hardens the upstream routes added in 0.19 (decision 0009).
