@@ -89,7 +89,11 @@ class BridgeConnectionManager
      * (flushHeldFrames()); dropped when the grace period ends, the waiters then being failed
      * by their own registries.
      *
-     * @var array<string, array<string, array{frame: array<string, mixed>, on_sent: (callable(): void)|null}>>
+     * `requires` is what the bridge must announce at hello to be sent the frame (a capability
+     * such as `file_uploads`, or a hello field such as `mcp_apps`), checked against the bridge
+     * that comes back; `on_refused` fails its waiter when that bridge does not.
+     *
+     * @var array<string, array<string, array{frame: array<string, mixed>, on_sent: (callable(): void)|null, requires?: string|null, on_refused?: (callable(): void)|null}>>
      */
     private array $heldFrames = [];
 
@@ -329,6 +333,17 @@ class BridgeConnectionManager
         return $this->awaitingReconnect[$userId]['bridge'] ?? [];
     }
 
+    /**
+     * Whether this user's connected bridge announced `$requirement` at hello: a capability
+     * (bridgeSupports()), or a hello field it sends only when it can (`mcp_apps`,
+     * `mcp_upstream_auth`).
+     */
+    public function bridgeHas(int|string $userId, string $requirement): bool
+    {
+        return $this->bridgeSupports($userId, $requirement)
+            || is_array($this->getBridgeInfo($userId)[$requirement] ?? null);
+    }
+
     /** bridgeSupports(), also while a short drop is waited out (see reachableBridgeInfo()). */
     public function reachableBridgeSupports(int|string $userId, string $capability): bool
     {
@@ -346,20 +361,30 @@ class BridgeConnectionManager
      * waits on its answer is failed then by its own registry (usage, turn input, exchange) or
      * by the user-gone listeners (transfers).
      *
-     * `$key` names a frame that may be held twice (a re-send of one already out): a second
-     * frame under the same key replaces the first.
+     * `$key` names a frame that may be held twice (a re-send of one already out), or one its
+     * caller may have to drop (dropHeldFrame()): a second frame under the same key replaces
+     * the first.
+     *
+     * `$requires` is what the frame needs the bridge to have announced (see bridgeHas()). A
+     * held frame is sent after the reconnect only when the bridge that came back announced it
+     * too, which an older bridge taking the machine's place may not have; otherwise it is
+     * dropped unsent and `$onRefused` runs, so its waiter is failed at once (PROTOCOL.md,
+     * "Short drops").
      *
      * @param  array<string, mixed>  $frame
      * @param  (callable(): void)|null  $onSent
+     * @param  (callable(): void)|null  $onRefused
      * @return bool  False only when the machine is neither connected nor waited for, or the
      *               write failed.
      */
-    public function sendOrHold(int|string $userId, array $frame, ?callable $onSent = null, ?string $key = null): bool
+    public function sendOrHold(int|string $userId, array $frame, ?callable $onSent = null, ?string $key = null, ?string $requires = null, ?callable $onRefused = null): bool
     {
         $userId = (string) $userId;
 
         if (isset($this->awaitingReconnect[$userId])) {
-            $this->heldFrames[$userId][$key ?? 'held:'.(++$this->heldSequence)] = ['frame' => $frame, 'on_sent' => $onSent];
+            $this->heldFrames[$userId][$key ?? 'held:'.(++$this->heldSequence)] = [
+                'frame' => $frame, 'on_sent' => $onSent, 'requires' => $requires, 'on_refused' => $onRefused,
+            ];
 
             return true;
         }
@@ -380,6 +405,9 @@ class BridgeConnectionManager
      * Run after the `welcome` is written (BridgeWebSocketHandler), and on the one-second tick.
      * Stops at the first frame that cannot be written, keeping it and the rest held.
      *
+     * A frame the bridge that came back cannot handle (it did not announce what the frame
+     * `requires`, see sendOrHold()) is not sent: it is dropped and its waiter failed.
+     *
      * @return int how many frames were sent
      */
     public function flushHeldFrames(int|string $userId): int
@@ -392,6 +420,31 @@ class BridgeConnectionManager
         }
 
         foreach ($this->heldFrames[$userId] ?? [] as $key => $held) {
+            // Dropped meanwhile by the callback of a frame before it.
+            if (! isset($this->heldFrames[$userId][$key])) {
+                continue;
+            }
+
+            $requires = $held['requires'] ?? null;
+            if ($requires !== null && ! $this->bridgeHas($userId, $requires)) {
+                unset($this->heldFrames[$userId][$key]);
+                Log::info('AI Bridge: a held frame is not sent: the bridge that reconnected does not support it', [
+                    'user_id' => $userId,
+                    'type' => $held['frame']['type'] ?? null,
+                    'requires' => $requires,
+                ]);
+
+                if (($held['on_refused'] ?? null) !== null) {
+                    try {
+                        ($held['on_refused'])();
+                    } catch (\Throwable $e) {
+                        Log::warning('AI Bridge: a refused held frame\'s callback failed', ['error' => $e->getMessage()]);
+                    }
+                }
+
+                continue;
+            }
+
             if (! $this->sendToUser($userId, $held['frame'])) {
                 break;
             }
@@ -1671,7 +1724,16 @@ class BridgeConnectionManager
         foreach ($this->pendingTurnInputs as $pending) {
             if ($pending['user_id'] === $userId && $pending['frame'] !== []) {
                 $frame = $pending['frame'];
-                $this->heldFrames[$userId][self::turnInputHoldKey((string) $frame['request_id'], (string) $frame['message_id'])] = ['frame' => $frame, 'on_sent' => $pending['on_sent']];
+                $requestId = (string) $frame['request_id'];
+                $messageId = (string) $frame['message_id'];
+                // Out before the drop: whether that bridge read it is unknown, so a bridge
+                // that comes back without turn_input leaves it unanswered (`no_answer`).
+                $this->heldFrames[$userId][self::turnInputHoldKey($requestId, $messageId)] = [
+                    'frame' => $frame,
+                    'on_sent' => $pending['on_sent'],
+                    'requires' => 'turn_input',
+                    'on_refused' => fn () => $this->resolvePendingTurnInput($requestId, $messageId, $userId, ['status' => 'rejected', 'reason' => 'no_answer']),
+                ];
             }
         }
 

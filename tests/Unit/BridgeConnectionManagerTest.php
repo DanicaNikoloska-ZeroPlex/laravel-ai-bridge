@@ -712,7 +712,9 @@ test('a usage question and a mid-turn message already out are put again after th
     $this->manager->removeConnection('user-1', 'websocket_closed');
     expect($answers)->toBe([]);
 
+    // The bridge that comes back takes input, as the one that dropped did.
     connectReliable($this->manager, 'conn-2');
+    $this->manager->setBridgeInfo('user-1', ['capabilities' => ['reliable_delivery', 'turn_input']]);
     $this->manager->reattachRunningTurns('user-1', []);
     $this->manager->flushHeldFrames('user-1');
 

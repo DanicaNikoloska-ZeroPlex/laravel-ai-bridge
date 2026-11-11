@@ -52,6 +52,22 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   `reachableBridgeInfo()`, `reachableBridgeSupports()`, `sendOrHold()`, `flushHeldFrames()`,
   `isHeldFrame()`, `dropHeldFrame()`, `lostAfterDropMessage()`, `MessageTypes::STREAM_ACK`.
 
+### Fixed (D09710 review follow-up)
+
+- **A held transfer frame follows its transfer.** An `upload_offer` or `file_read` held through a
+  short drop is now held under its transfer (`upload_offer:<id>`, `file_read:<id>`, as `upload_sent`
+  already was) and dropped when the transfer fails while it is held (the browser went away, a clock
+  ran out, the grace period ended). The machine is no longer sent work for a transfer that no longer
+  exists after the reconnect, nor an `upload_abort` / `file_read_cancel` for one it never saw.
+- **Held work is re-checked against the bridge that comes back.** A frame held through a short drop
+  is sent after the reconnect only when the bridge that said `hello` announced what it needs:
+  `file_uploads` (`upload_offer`, `upload_sent`), `file_downloads` (`file_read`), `turn_input`, or
+  `mcp_apps` / `mcp_upstream_auth` (an exchange). When an older bridge takes the machine's place, such a
+  frame is dropped unsent and its waiter is answered at once: a transfer 409 `unsupported`, a
+  `turn_input` `send_failed` (`no_answer` if it went out before the drop), an exchange 409
+  `<needs>_unsupported`. `sendOrHold()` takes the requirement and a callback for the refusal
+  (`$requires`, `$onRefused`); `BridgeConnectionManager::bridgeHas()` is new.
+
 ### Unchanged
 
 - A bridge without `reliable_delivery` (no `seq`, no `running_turns`) behaves exactly as before: its
