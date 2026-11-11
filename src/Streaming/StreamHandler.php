@@ -219,6 +219,13 @@ class StreamHandler
      */
     private array $seenToolResults = [];
 
+    /**
+     * Store writes that failed, oldest first, to be tried again (see deferStore()).
+     *
+     * @var list<Closure(): mixed>
+     */
+    private array $unstored = [];
+
     public readonly string $requestId;
 
     public function __construct(
@@ -1353,6 +1360,54 @@ class StreamHandler
         return BlockType::tryFrom($event->data['block_type'] ?? '')
             ?? $this->blockTypes[$blockIndex]
             ?? BlockType::Text;
+    }
+
+    /**
+     * Keep a store write that failed, to try it again later (retryStore()).
+     *
+     * Used by a sink such as BufferingSink: a write the stream store refused is not lost
+     * but kept, in order, and a later write waits behind it. Whether anything is kept
+     * (hasUnstored()) is what decides that a numbered frame may not be confirmed to a
+     * `reliable_delivery` bridge yet (PROTOCOL.md, "Short drops"): the bridge keeps its
+     * copy until the frame is in the store.
+     *
+     * @param  Closure(): mixed  $write  Throws when it fails again.
+     */
+    public function deferStore(Closure $write): void
+    {
+        $this->unstored[] = $write;
+    }
+
+    /** Whether a store write of this turn failed and has not been written since. */
+    public function hasUnstored(): bool
+    {
+        return $this->unstored !== [];
+    }
+
+    /**
+     * Try the kept store writes again, oldest first, stopping at the first that fails.
+     *
+     * @return bool  True when nothing is kept any more.
+     */
+    public function retryStore(): bool
+    {
+        while ($this->unstored !== []) {
+            try {
+                ($this->unstored[0])();
+            } catch (\Throwable $e) {
+                Log::warning('AI Bridge: stream store still failing; the write is kept for the next try', [
+                    'request_id' => $this->requestId,
+                    'kept' => count($this->unstored),
+                    'error' => $e->getMessage(),
+                ]);
+
+                return false;
+            }
+
+            array_shift($this->unstored);
+        }
+
+        return true;
     }
 
     /**

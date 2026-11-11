@@ -50,12 +50,16 @@ class BridgeConnectionManager
     /**
      * Map of request_id => pending request metadata.
      *
-     * `last_seq` is the highest `seq` stored for the turn (0 before the first; only a
-     * `reliable_delivery` bridge numbers its frames), `seq_restart` that a re-issued turn may
-     * start numbering again from 1, and `detached_until` the unix time a turn detached by a
-     * drop fails at unless its bridge re-attaches it (null while attached).
+     * `last_seq` is the highest `seq` processed for the turn (0 before the first; only a
+     * `reliable_delivery` bridge numbers its frames), `confirmed_seq` the highest that is also
+     * in the stream store and may be confirmed with `stream_ack` (at most `last_seq`),
+     * `stalled_since` the unix time the turn stopped making progress (a frame after a gap, a
+     * frame that failed, a store write kept for a retry; null while it makes progress),
+     * `seq_restart` that a re-issued turn may start numbering again from 1, and
+     * `detached_until` the unix time a turn detached by a drop fails at unless its bridge
+     * re-attaches it (null while attached).
      *
-     * @var array<string, array{stream_handler: StreamHandler, user_id: string, carry: array<string, mixed>, last_seq: int, seq_restart: bool, detached_until: int|null}>
+     * @var array<string, array{stream_handler: StreamHandler, user_id: string, carry: array<string, mixed>, last_seq: int, confirmed_seq: int, stalled_since: int|null, seq_restart: bool, detached_until: int|null}>
      */
     private array $pendingRequests = [];
 
@@ -900,6 +904,8 @@ class BridgeConnectionManager
             'user_id' => $userId,
             'carry' => $carry,
             'last_seq' => 0,
+            'confirmed_seq' => 0,
+            'stalled_since' => null,
             'seq_restart' => false,
             'detached_until' => null,
         ];
@@ -957,6 +963,52 @@ class BridgeConnectionManager
     public function lastStoredSeq(string $requestId): int
     {
         return $this->pendingRequests[$requestId]['last_seq'] ?? 0;
+    }
+
+    /**
+     * Everything up to `$seq` of a pending turn is processed and in the stream store: it may
+     * be confirmed to the bridge, and the turn is making progress again.
+     */
+    public function confirmSeq(string $requestId, int $seq): void
+    {
+        if (isset($this->pendingRequests[$requestId])) {
+            $this->pendingRequests[$requestId]['confirmed_seq'] = $seq;
+            $this->pendingRequests[$requestId]['stalled_since'] = null;
+        }
+    }
+
+    /** The highest `seq` of a pending turn that may be confirmed (see confirmSeq()), 0 when none. */
+    public function confirmedSeq(string $requestId): int
+    {
+        return $this->pendingRequests[$requestId]['confirmed_seq'] ?? 0;
+    }
+
+    /**
+     * A pending turn did not make progress on a frame (one after a gap, one that failed, one
+     * whose store write is kept for a retry). The first such moment is kept: the stall bound
+     * (MessageHandler::tickUnconfirmedFrames()) counts from it until confirmSeq().
+     */
+    public function markStalled(string $requestId, ?int $now = null): void
+    {
+        if (isset($this->pendingRequests[$requestId]) && $this->pendingRequests[$requestId]['stalled_since'] === null) {
+            $this->pendingRequests[$requestId]['stalled_since'] = $now ?? time();
+        }
+    }
+
+    /**
+     * The attached pending turns that have not made progress since `$since` or before. A
+     * detached turn is not among them: its grace period is what bounds it.
+     *
+     * @return list<string>
+     */
+    public function stalledRequestIds(int $since): array
+    {
+        return array_map('strval', array_keys(array_filter(
+            $this->pendingRequests,
+            static fn (array $entry): bool => ($entry['stalled_since'] ?? null) !== null
+                && $entry['stalled_since'] <= $since
+                && ($entry['detached_until'] ?? null) === null,
+        )));
     }
 
     /**
@@ -1040,6 +1092,11 @@ class BridgeConnectionManager
         foreach ($this->detachedRequestIdsForUser($userId) as $requestId) {
             if (in_array($requestId, $runningRequestIds, true)) {
                 $this->pendingRequests[$requestId]['detached_until'] = null;
+                // A stall seen before the drop is counted again from now: the bridge re-sends
+                // what was not confirmed right after this hello.
+                if ($this->pendingRequests[$requestId]['stalled_since'] !== null) {
+                    $this->pendingRequests[$requestId]['stalled_since'] = time();
+                }
                 $reattached[] = $requestId;
             } else {
                 $this->failDetachedRequest($requestId, TurnLostAfterDrop::NOT_LISTED);

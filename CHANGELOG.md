@@ -54,6 +54,21 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
 ### Fixed (D09710 review follow-up)
 
+- **A frame is confirmed only once it is in the stream store.** A `BufferingSink` write that fails is
+  no longer logged and lost: it is kept on the turn's handler (`StreamHandler::deferStore()`) and
+  written again, in order, before the next write, on a re-send of the frame and on the serve process's
+  one-second tick (`MessageHandler::tickUnconfirmedFrames()`). Until then the numbered frame is not
+  confirmed with `stream_ack`, so a `reliable_delivery` bridge keeps its copy; the frame is never
+  processed a second time (the conversation recorder sees it once). A final frame is confirmed only
+  once its writes are done. Also for a bridge without `reliable_delivery`, a failed buffer write is
+  now written later instead of leaving a hole (nothing changes on the wire for it).
+- **A turn that can no longer be stored ends instead of hanging.** A connected turn that makes no
+  progress for `ai-bridge.websocket.stream_stall_seconds` (new, default 60: a frame that fails on every
+  re-send, a gap that is never filled, a stream store that stays down) is ended with the error
+  `stream_stalled` and a closed `stream_ack`. Together with the bridge's re-send on a live connection
+  (ai-bridge, same release) a frame lost to a server-side error no longer stalls the turn until a
+  reconnect.
+
 - **A held transfer frame follows its transfer.** An `upload_offer` or `file_read` held through a
   short drop is now held under its transfer (`upload_offer:<id>`, `file_read:<id>`, as `upload_sent`
   already was) and dropped when the transfer fails while it is held (the browser went away, a clock

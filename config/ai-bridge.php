@@ -144,9 +144,16 @@ return [
          * stream_ack_interval: the most seconds between two `stream_ack`s for a turn while
          * its frames arrive (a final frame is always confirmed at once). 0 confirms every
          * frame.
+         *
+         * stream_stall_seconds: how long a connected turn may make no progress (a frame that
+         * keeps failing, a gap its bridge does not fill, output the stream store keeps
+         * refusing) before it is ended with the error `stream_stalled` instead of waiting
+         * with no output. Above the bridge's own re-send waits, so a frame lost once is
+         * re-sent and stored well before this.
          */
         'reconnect_grace_seconds' => (int) env('AI_BRIDGE_RECONNECT_GRACE_SECONDS', 120),
         'stream_ack_interval' => 1,
+        'stream_stall_seconds' => 60,
     ],
 
     /*

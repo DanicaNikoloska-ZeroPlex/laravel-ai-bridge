@@ -133,6 +133,7 @@ class BridgeWebSocketServer
     public function tickReliableDelivery(): void
     {
         try {
+            $this->messageHandler->tickUnconfirmedFrames();
             $this->messageHandler->flushStreamAcks();
             $this->connectionManager->expireDetachedRequests();
             $this->connectionManager->flushAllHeldFrames();
