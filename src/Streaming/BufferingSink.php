@@ -72,11 +72,13 @@ final class BufferingSink
         $suppressThinking = (bool) config('ai-bridge.streaming.suppress_thinking_blocks', true);
         $currentBlockSuppressed = false;
 
-        $append = static function (string $event, array $data) use ($handler, $store, $rid): void {
+        // `$terminal` for the turn's final event: kept past the bound on kept writes, and
+        // tried once more when the rest is given up (StreamHandler::forceTerminalStore()).
+        $append = static function (string $event, array $data, bool $terminal = false) use ($handler, $store, $rid): void {
             self::write($handler, static fn () => $store->appendEvent($rid, $event, $data), [
                 'request_id' => $rid,
                 'event' => $event,
-            ]);
+            ], $data, $terminal);
         };
 
         $handler->onBlockStart(function (StreamEvent $event) use ($append, $suppressThinking, &$currentBlockSuppressed): void {
@@ -178,17 +180,17 @@ final class BufferingSink
         // Terminal events both write the event AND flip the buffer status, so
         // the SSE tail and the status endpoint can tell the turn is finished.
         $handler->onDone(function (?array $usage, array $meta = []) use ($append, $handler, $store, $rid): void {
-            $append(MessageTypes::DONE, ['usage' => $usage] + self::publicDoneMeta($meta));
+            $append(MessageTypes::DONE, ['usage' => $usage] + self::publicDoneMeta($meta), true);
             self::completeQuietly($handler, $store, $rid, 'completed');
         });
 
         $handler->onError(function (string $code, string $errorMessage, array $meta = []) use ($append, $handler, $store, $rid): void {
-            $append(MessageTypes::ERROR, ['code' => $code, 'message' => $errorMessage] + self::publicCancelledMeta($meta));
+            $append(MessageTypes::ERROR, ['code' => $code, 'message' => $errorMessage] + self::publicCancelledMeta($meta), true);
             self::completeQuietly($handler, $store, $rid, 'failed');
         });
 
         $handler->onCancelled(function (string $reason, array $meta = []) use ($append, $handler, $store, $rid): void {
-            $append(MessageTypes::CANCELLED, ['reason' => $reason] + self::publicCancelledMeta($meta));
+            $append(MessageTypes::CANCELLED, ['reason' => $reason] + self::publicCancelledMeta($meta), true);
             self::completeQuietly($handler, $store, $rid, 'cancelled');
         });
     }
@@ -204,7 +206,7 @@ final class BufferingSink
         self::write($handler, static fn () => $store->complete($rid, $status), [
             'request_id' => $rid,
             'status' => $status,
-        ]);
+        ], null, true);
     }
 
     /**
@@ -213,11 +215,13 @@ final class BufferingSink
      *
      * @param  \Closure(): mixed  $write
      * @param  array<string, mixed>  $context  For the log line.
+     * @param  array<string, mixed>|null  $payload  What it writes, sized for the bound on kept writes.
+     * @param  bool  $terminal  Whether it ends the turn (StreamHandler::deferStore()).
      */
-    private static function write(StreamHandler $handler, \Closure $write, array $context): void
+    private static function write(StreamHandler $handler, \Closure $write, array $context, ?array $payload = null, bool $terminal = false): void
     {
         if ($handler->hasUnstored() && ! $handler->retryStore()) {
-            $handler->deferStore($write);
+            $handler->deferStore($write, self::sizeOf($payload), $terminal);
 
             return;
         }
@@ -228,9 +232,22 @@ final class BufferingSink
             Log::error('AI Bridge: failed to buffer stream event; kept to write again', $context + [
                 'error' => $e->getMessage(),
             ]);
-            $handler->deferStore($write);
+            $handler->deferStore($write, self::sizeOf($payload), $terminal);
         }
     }
+
+    /** Roughly what a kept write holds on to: its payload, encoded. Only computed for a write that is kept. */
+    private static function sizeOf(?array $payload): int
+    {
+        if ($payload === null) {
+            return 0;
+        }
+
+        $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+
+        return is_string($encoded) ? strlen($encoded) : 0;
+    }
+
     /**
      * What a browser is told beside a cancellation.
      *

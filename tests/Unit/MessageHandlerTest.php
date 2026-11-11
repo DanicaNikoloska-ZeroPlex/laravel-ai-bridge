@@ -2154,3 +2154,110 @@ test('a detached turn is not ended for a stall: the grace period bounds it (revi
     expect($turn->errors)->toBe([])
         ->and($this->manager->isDetached('req-2'))->toBeTrue();
 });
+
+// --- D09710 CodeRabbit: a deferred terminal write is owned on every cleanup path ---
+
+test('a turn that ends while its store writes are kept is finished in the store once it is back, on every ending path (CodeRabbit 4537573143)', function (string $frame, string $status) {
+    $rig = bufferedRig($this);
+
+    $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::BLOCK_DELTA,
+        'data' => ['block_type' => 'text', 'block_index' => 0, 'content' => 'a'],
+    ]));
+    $rig->store->down = true;
+    $this->messageHandler->handleMessage('conn-1', null, $frame);
+
+    expect($this->manager->getPendingRequest('req-1'))->toBeNull()
+        ->and($rig->store->status($rig->rid)['status'])->toBe('streaming');
+
+    $this->messageHandler->tickUnconfirmedFrames();
+    expect($rig->store->status($rig->rid)['status'])->toBe('streaming');
+
+    $rig->store->down = false;
+    $this->messageHandler->tickUnconfirmedFrames();
+
+    // MUTATION: drop the ended-turn sweep in tickUnconfirmedFrames() and this stays streaming.
+    expect($rig->store->status($rig->rid)['status'])->toBe($status)
+        ->and(array_column($rig->store->inner->range($rig->rid), 'event'))->toBe([MessageTypes::BLOCK_DELTA, json_decode($frame, true)['event'] ?? MessageTypes::CANCELLED])
+        ->and($this->manager->unstoredHandlers())->toBe([]);
+})->with([
+    'an unnumbered done' => [json_encode(['type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::DONE, 'data' => []]), 'completed'],
+    'an unnumbered error' => [json_encode(['type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::ERROR, 'data' => ['code' => 'x', 'message' => 'y']]), 'failed'],
+    'a top-level cancelled' => [json_encode(['type' => MessageTypes::CANCELLED, 'request_id' => 'req-1']), 'cancelled'],
+]);
+
+test('a stalled turn ended while the store is down is marked failed once the store is back (CodeRabbit 4537573143)', function () {
+    config(['ai-bridge.websocket.stream_ack_interval' => 0, 'ai-bridge.websocket.stream_stall_seconds' => 60]);
+    $rig = bufferedRig($this);
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $rig->store->down = true;
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(2, 'b'));
+    $this->messageHandler->tickUnconfirmedFrames(time() + 61);
+
+    expect($this->manager->getPendingRequest('req-1'))->toBeNull()
+        ->and($rig->store->status($rig->rid)['status'])->toBe('streaming');
+
+    $rig->store->down = false;
+    $this->messageHandler->tickUnconfirmedFrames(time() + 62);
+
+    expect($rig->store->status($rig->rid)['status'])->toBe('failed')
+        ->and($rig->store->deltas($rig->rid))->toBe(['a', 'b'])
+        ->and(collect($rig->store->inner->range($rig->rid))->last()['data']['code'] ?? null)->toBe('stream_stalled');
+});
+
+test('when the store keeps refusing an ended turn\'s output, the rest is given up after the stall bound but the turn is still marked finished (CodeRabbit 4537573143)', function () {
+    config(['ai-bridge.websocket.stream_stall_seconds' => 60]);
+    $rig = bufferedRig($this);
+
+    // Appends keep failing; the status write works.
+    $rig->store->start($rig->rid);
+    $rig->store->failAppends = PHP_INT_MAX;
+    $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::BLOCK_DELTA,
+        'data' => ['block_type' => 'text', 'block_index' => 0, 'content' => 'a'],
+    ]));
+    $this->messageHandler->handleMessage('conn-1', null, json_encode(['type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::DONE, 'data' => []]));
+
+    $this->messageHandler->tickUnconfirmedFrames(time());
+    $this->messageHandler->tickUnconfirmedFrames(time() + 30);
+    expect($rig->store->status($rig->rid)['status'])->toBe('streaming');
+
+    $this->messageHandler->tickUnconfirmedFrames(time() + 61);
+
+    expect($rig->store->status($rig->rid)['status'])->toBe('completed')
+        ->and($this->manager->unstoredHandlers())->toBe([]);
+});
+
+// --- D09710 CodeRabbit: the kept store writes of a turn are bounded ---
+
+test('a turn whose kept store writes reach their bound stops keeping more and is ended at once, not after the stall bound (CodeRabbit 4537573154)', function () {
+    config([
+        'ai-bridge.websocket.stream_ack_interval' => 0,
+        'ai-bridge.websocket.stream_stall_seconds' => 60,
+        'ai-bridge.websocket.stream_store_backlog_bytes' => 2000,
+    ]);
+    $rig = bufferedRig($this);
+    $errors = [];
+    $rig->handler->onError(function (string $code) use (&$errors) {
+        $errors[] = $code;
+    });
+
+    $this->messageHandler->handleMessage('conn-1', null, numberedDelta(1, 'a'));
+    $rig->store->down = true;
+    for ($seq = 2; $seq <= 10; $seq++) {
+        $this->messageHandler->handleMessage('conn-1', null, numberedDelta($seq, str_repeat('x', 500)));
+    }
+
+    // MUTATION: drop the bound in StreamHandler::deferStore() and nothing ends before the stall bound.
+    $this->messageHandler->tickUnconfirmedFrames(time());
+
+    expect($errors)->toBe(['stream_stalled'])
+        ->and($this->manager->getPendingRequest('req-1'))->toBeNull()
+        ->and(end($rig->sent))->toBe(['type' => 'stream_ack', 'request_id' => 'req-1', 'seq' => 1, 'closed' => true]);
+
+    // Its end is still written once the store is back.
+    $rig->store->down = false;
+    $this->messageHandler->tickUnconfirmedFrames(time() + 1);
+    expect($rig->store->status($rig->rid)['status'])->toBe('failed');
+});

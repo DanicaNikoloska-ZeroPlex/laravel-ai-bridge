@@ -1314,6 +1314,12 @@ class MessageHandler
      *    bounded by its grace period instead.
      * 3. An ended turn whose final frame could not be confirmed (its store writes kept) is
      *    let go of after the same bound, with a closed `stream_ack`.
+     * 4. A connected turn whose kept store writes reached their bound
+     *    (StreamHandler::deferStore()) is ended with `stream_stalled` at once.
+     * 5. An ended turn's kept store writes, however it ended (an unnumbered `done`, a stall,
+     *    a cancel, a drop), are tried again; after the same bound all but the writes that end
+     *    it are given up and those are tried once more (StreamHandler::forceTerminalStore()),
+     *    so its buffer does not stay `streaming`.
      *
      * @return int how many turns were ended for a stall
      */
@@ -1321,6 +1327,7 @@ class MessageHandler
     {
         $now ??= time();
         $bound = max(1, (int) config('ai-bridge.websocket.stream_stall_seconds', 60));
+        $full = [];
 
         foreach ($this->connectionManager->connectedUserIds() as $userId) {
             foreach ($this->connectionManager->pendingRequestIdsForUser($userId) as $requestId) {
@@ -1335,12 +1342,16 @@ class MessageHandler
                         $this->sendStreamAck((string) $userId, $requestId, $after);
                     }
                 }
+
+                if ($handler !== null && $handler->storeBacklogFull() && ! $this->connectionManager->isDetached($requestId)) {
+                    $full[$requestId] = true;
+                }
             }
         }
 
         $ended = 0;
-        foreach ($this->connectionManager->stalledRequestIds($now - $bound) as $requestId) {
-            $this->endStalledTurn($requestId);
+        foreach (array_unique([...array_keys($full), ...$this->connectionManager->stalledRequestIds($now - $bound)]) as $requestId) {
+            $this->endStalledTurn((string) $requestId);
             $ended++;
         }
 
@@ -1349,7 +1360,7 @@ class MessageHandler
             $this->retryUnstoredFinal($requestId);
             $entry = $this->unstoredFinals[$requestId] ?? null;
 
-            if ($entry !== null && $entry['since'] <= $now - $bound) {
+            if ($entry !== null && ($entry['since'] <= $now - $bound || $entry['handler']->storeBacklogFull())) {
                 unset($this->unstoredFinals[$requestId]);
                 Log::error('AI Bridge: an ended turn\'s output could not be written to the stream store; giving up', [
                     'request_id' => $requestId,
@@ -1358,8 +1369,49 @@ class MessageHandler
             }
         }
 
+        $this->retryEndedTurnStores($now, $bound);
+
         return $ended;
     }
+
+    /**
+     * Try again the kept store writes of turns that have ended, on whichever path they ended
+     * (see tickUnconfirmedFrames(), step 5), and give up on them `$bound` seconds after the
+     * turn was first seen ended here. A pending turn's writes are its own path's to retry
+     * (catchUpStore()), which confirms what is then stored.
+     */
+    private function retryEndedTurnStores(int $now, int $bound): void
+    {
+        foreach ($this->connectionManager->unstoredHandlers() as $handler) {
+            if ($this->connectionManager->getPendingRequest($handler->requestId) === $handler) {
+                continue;
+            }
+
+            $id = spl_object_id($handler);
+            $since = $this->endedUnstoredSince[$id] ??= $now;
+
+            if ($handler->hasKeptWrites()) {
+                $handler->retryStore();
+            }
+
+            if ($handler->hasKeptWrites() && $since <= $now - $bound) {
+                $handler->forceTerminalStore();
+            }
+
+            if (! $handler->hasKeptWrites()) {
+                $this->connectionManager->forgetUnstoredHandler($handler);
+                unset($this->endedUnstoredSince[$id]);
+            }
+        }
+    }
+
+    /**
+     * When a turn with kept store writes was first seen ended (retryEndedTurnStores()), by the
+     * handler's object id (held by BridgeConnectionManager until forgotten, so not reused).
+     *
+     * @var array<int, int>
+     */
+    private array $endedUnstoredSince = [];
 
     /** End a pending turn that stopped making progress (see tickUnconfirmedFrames()). */
     private function endStalledTurn(string $requestId): void

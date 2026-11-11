@@ -150,10 +150,17 @@ return [
          * refusing) before it is ended with the error `stream_stalled` instead of waiting
          * with no output. Above the bridge's own re-send waits, so a frame lost once is
          * re-sent and stored well before this.
+         *
+         * stream_store_backlog_bytes / stream_store_backlog_writes: how much of one turn's
+         * output may be kept while the stream store refuses it. Past either, no more is kept
+         * and the turn is ended with `stream_stalled` at once: a long outage must not let one
+         * turn exhaust the serve process every other user shares.
          */
         'reconnect_grace_seconds' => (int) env('AI_BRIDGE_RECONNECT_GRACE_SECONDS', 120),
         'stream_ack_interval' => 1,
         'stream_stall_seconds' => 60,
+        'stream_store_backlog_bytes' => 8 * 1024 * 1024,
+        'stream_store_backlog_writes' => 2000,
     ],
 
     /*

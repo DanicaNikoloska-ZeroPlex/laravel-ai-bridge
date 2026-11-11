@@ -68,6 +68,21 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   `stream_stalled` and a closed `stream_ack`. Together with the bridge's re-send on a live connection
   (ai-bridge, same release) a frame lost to a server-side error no longer stalls the turn until a
   reconnect.
+- **A turn's kept stream store writes are finished on every ending path (CodeRabbit review).** Writes
+  kept for a retry are owned by the serve process (`BridgeConnectionManager::unstoredHandlers()`) and
+  tried again on the tick however the turn ended: an unnumbered `done` or `error`, a `cancelled`, a
+  stall, a drop. When the store keeps refusing them, after `stream_stall_seconds` all but the turn's
+  final event and status are given up and those are tried once more
+  (`StreamHandler::forceTerminalStore()`), so its buffer no longer stays `streaming`.
+- **The kept writes are bounded per turn.** New `ai-bridge.websocket.stream_store_backlog_bytes`
+  (default 8 MiB) and `stream_store_backlog_writes` (default 2000); past either, no more is kept and a
+  connected turn is ended with `stream_stalled` on the next tick instead of after the stall bound.
+- **An appended event is not appended twice.** `RedisStreamStore::appendEvent()` no longer throws once
+  `RPUSH` succeeded (a failed lifetime renewal is logged), so the retry of a kept write cannot duplicate
+  a delta. A custom `StreamStoreContract` driver should throw only when the event was not appended.
+- **A held mid-turn message keeps its refusal through a second drop.** A `turn_input` (or usage
+  question) still held because its write after the reconnect failed keeps its held entry when the
+  machine drops again, so an older bridge taking its place answers it `send_failed`, not `no_answer`.
 
 - **A re-sent `session_lost` of the old run no longer ends the re-issued turn.** A bridge that
   announces the new `continued_seq` in `hello` is sent `first_seq` (the error frame's `seq` + 1) on the

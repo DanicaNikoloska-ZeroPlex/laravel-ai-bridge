@@ -912,6 +912,47 @@ class BridgeConnectionManager
             'seq_restart' => false,
             'detached_until' => null,
         ];
+
+        // From now on a store write this turn has to keep (BufferingSink) is owned here, so
+        // it is tried again after the turn ended on whichever path (unstoredHandlers()).
+        $this->storeDeferredWatched ??= new \WeakMap();
+        if (! isset($this->storeDeferredWatched[$handler])) {
+            $this->storeDeferredWatched[$handler] = true;
+            $handler->whenStoreDeferred(function (StreamHandler $kept): void {
+                $this->unstoredHandlers[spl_object_id($kept)] = $kept;
+            });
+        }
+    }
+
+    /**
+     * Turn handlers with store writes kept to be tried again, by object id, whether their turn
+     * is still pending or ended (on any path: its final frame, an unnumbered `done`, a stall, a
+     * cancel, a drop). MessageHandler::tickUnconfirmedFrames() tries them again and, after
+     * `stream_stall_seconds`, gives up on all but the writes that end the turn, so its buffer
+     * never stays `streaming`.
+     *
+     * @var array<int, StreamHandler>
+     */
+    private array $unstoredHandlers = [];
+
+    /**
+     * Handlers whose kept writes are reported to $unstoredHandlers (weak: one registered
+     * again, for a re-issue, is not watched twice, and a finished one is not held on to).
+     *
+     * @var \WeakMap<StreamHandler, true>|null
+     */
+    private ?\WeakMap $storeDeferredWatched = null;
+
+    /** @return list<StreamHandler> handlers with store writes kept (see $unstoredHandlers) */
+    public function unstoredHandlers(): array
+    {
+        return array_values($this->unstoredHandlers);
+    }
+
+    /** Stop tracking a handler whose kept writes are done or given up on. */
+    public function forgetUnstoredHandler(StreamHandler $handler): void
+    {
+        unset($this->unstoredHandlers[spl_object_id($handler)]);
     }
 
     /** What a numbered frame is to its turn; see acceptSeq(). */
@@ -1816,9 +1857,11 @@ class BridgeConnectionManager
             'bridge' => $this->connections[$userId]['bridge'] ?? [],
         ];
 
+        // An entry already held (put during an earlier drop, its write after that hello
+        // failed) was never written: it keeps what it was held with, its refusal included.
         foreach ($this->pendingUsage as $requestId => $pending) {
             if ($pending['user_id'] === $userId && $pending['frame'] !== []) {
-                $this->heldFrames[$userId][self::usageHoldKey((string) $requestId)] = ['frame' => $pending['frame'], 'on_sent' => $pending['on_sent']];
+                $this->heldFrames[$userId][self::usageHoldKey((string) $requestId)] ??= ['frame' => $pending['frame'], 'on_sent' => $pending['on_sent']];
             }
         }
 
@@ -1829,7 +1872,7 @@ class BridgeConnectionManager
                 $messageId = (string) $frame['message_id'];
                 // Out before the drop: whether that bridge read it is unknown, so a bridge
                 // that comes back without turn_input leaves it unanswered (`no_answer`).
-                $this->heldFrames[$userId][self::turnInputHoldKey($requestId, $messageId)] = [
+                $this->heldFrames[$userId][self::turnInputHoldKey($requestId, $messageId)] ??= [
                     'frame' => $frame,
                     'on_sent' => $pending['on_sent'],
                     'requires' => 'turn_input',
