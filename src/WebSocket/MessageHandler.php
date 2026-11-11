@@ -354,6 +354,7 @@ class MessageHandler
     private function reattachRunningTurns(string $userId, array $message): void
     {
         $listed = [];
+        $acked = [];
         $raw = $message['running_turns'] ?? null;
 
         if (is_array($raw) && array_is_list($raw)) {
@@ -361,11 +362,25 @@ class MessageHandler
                 $id = is_array($turn) ? ($turn['request_id'] ?? null) : null;
                 if (is_string($id) && $id !== '' && strlen($id) <= 256) {
                     $listed[] = $id;
+                    $acked[$id] = is_int($turn['last_acked_seq'] ?? null) ? $turn['last_acked_seq'] : 0;
                 }
             }
         }
 
-        $this->connectionManager->reattachRunningTurns($userId, $listed);
+        $result = $this->connectionManager->reattachRunningTurns($userId, $listed);
+
+        // A `session_lost` re-issue whose error frame the bridge never saw confirmed was lost
+        // with the connection: a continued_seq bridge that got it counts the error frame as
+        // confirmed (it numbers on after it). Sent again, after the welcome.
+        foreach ($result['reattached'] as $requestId) {
+            $reissue = $this->connectionManager->pendingReissue($requestId);
+            if ($reissue !== null && ($acked[$requestId] ?? 0) < $reissue['error_seq']) {
+                BridgeLog::info('session_lost re-issue not confirmed by the reconnected bridge; sending it again', [
+                    'request_id' => $requestId,
+                ]);
+                $this->connectionManager->holdFrame($userId, 'reissue:'.$requestId, $reissue['frame']);
+            }
+        }
     }
 
     /**
@@ -662,6 +677,11 @@ class MessageHandler
         $nested = is_array($message['capabilities'] ?? null) ? $message['capabilities'] : [];
         if (($nested['reliable_delivery'] ?? null) === true || ($message['reliable_delivery'] ?? null) === true) {
             $capabilities[] = 'reliable_delivery';
+        }
+        // Numbers a re-issued turn on from `ai_request.first_seq` instead of from 1 (PROTOCOL.md,
+        // "Short drops", re-issued turns).
+        if (($nested['continued_seq'] ?? null) === true || ($message['continued_seq'] ?? null) === true) {
+            $capabilities[] = 'continued_seq';
         }
 
         return [
@@ -1192,12 +1212,15 @@ class MessageHandler
         }
 
         // An exception leaves the frame uncounted (and is logged by the socket handler).
+        $this->routingSeq = $seq;
         try {
             $response = $this->routeStreamEvent($connectionId, $message);
         } catch (\Throwable $e) {
             $this->connectionManager->markStalled($requestId);
 
             throw $e;
+        } finally {
+            $this->routingSeq = null;
         }
 
         $final = $eventType === MessageTypes::ERROR || $eventType === MessageTypes::DONE;
@@ -1223,9 +1246,10 @@ class MessageHandler
 
         $this->connectionManager->commitSeq($requestId, $seq);
 
-        if ($final) {
+        if ($final && $this->connectionManager->pendingReissue($requestId) === null) {
             // Still pending after a final frame: a session_lost re-issue, which runs on under
-            // the same request id and may number its frames from 1 again.
+            // the same request id and may number its frames from 1 again. Not for a bridge
+            // told to number on (`first_seq`): there a seq 1 is the old run's frame again.
             $this->connectionManager->allowSeqRestart($requestId);
         }
 
@@ -1240,6 +1264,9 @@ class MessageHandler
 
         return $response;
     }
+
+    /** The `seq` of the numbered frame being routed now, null between frames (see recoverLostSession()). */
+    private ?int $routingSeq = null;
 
     /**
      * Turns that ended here with their final frame while a store write of theirs was still
@@ -2197,6 +2224,15 @@ class MessageHandler
         // BridgeStream recorded its own with the pending request.
         $carry = $this->requestCarry[$requestId] ?? $this->connectionManager->getPendingRequestCarry($requestId);
         $payload = $this->buildFreshAiRequest($conversation, $requestId, $carry);
+
+        // A numbered error frame from a bridge that numbers a re-issue on (`continued_seq`):
+        // the re-issued run starts at the next seq, so a re-send of the old run's frames is a
+        // duplicate, never mistaken for the new run's first frame. Kept until the new run's
+        // first frame is stored, to send it again should the connection drop with it.
+        if ($this->routingSeq !== null && $this->connectionManager->bridgeSupports($userId, 'continued_seq')) {
+            $payload['first_seq'] = $this->routingSeq + 1;
+            $this->connectionManager->noteReissue($requestId, $payload, $this->routingSeq);
+        }
 
         BridgeLog::info('session_lost — wiped cli_session_id, re-issuing as a fresh session', [
             'request_id' => $requestId,

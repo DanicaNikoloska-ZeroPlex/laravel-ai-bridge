@@ -59,7 +59,10 @@ class BridgeConnectionManager
      * `detached_until` the unix time a turn detached by a drop fails at unless its bridge
      * re-attaches it (null while attached).
      *
-     * @var array<string, array{stream_handler: StreamHandler, user_id: string, carry: array<string, mixed>, last_seq: int, confirmed_seq: int, stalled_since: int|null, seq_restart: bool, detached_until: int|null}>
+     * `reissue`, while set, is the `session_lost` re-issue of a bridge told to number it on
+     * (see noteReissue()).
+     *
+     * @var array<string, array{stream_handler: StreamHandler, user_id: string, carry: array<string, mixed>, last_seq: int, confirmed_seq: int, stalled_since: int|null, seq_restart: bool, detached_until: int|null, reissue?: array{frame: array<string, mixed>, error_seq: int}}>
      */
     private array $pendingRequests = [];
 
@@ -956,7 +959,48 @@ class BridgeConnectionManager
         if (isset($this->pendingRequests[$requestId])) {
             $this->pendingRequests[$requestId]['last_seq'] = $seq;
             $this->pendingRequests[$requestId]['seq_restart'] = false;
+
+            // The re-issued run has said something: its ai_request arrived.
+            if ($seq > ($this->pendingRequests[$requestId]['reissue']['error_seq'] ?? PHP_INT_MAX)) {
+                unset($this->pendingRequests[$requestId]['reissue']);
+            }
         }
+    }
+
+    /**
+     * A pending turn was re-issued (`session_lost`) to a bridge told to number it on from
+     * `first_seq`: keep the `ai_request` until the new run's first frame is stored, so it can
+     * be sent again when the connection dropped before the bridge saw it (see
+     * MessageHandler::reattachRunningTurns()).
+     *
+     * @param  array<string, mixed>  $frame
+     */
+    public function noteReissue(string $requestId, array $frame, int $errorSeq): void
+    {
+        if (isset($this->pendingRequests[$requestId])) {
+            $this->pendingRequests[$requestId]['reissue'] = ['frame' => $frame, 'error_seq' => $errorSeq];
+        }
+    }
+
+    /**
+     * The re-issue of a pending turn whose new run has not sent a frame yet, or null.
+     *
+     * @return array{frame: array<string, mixed>, error_seq: int}|null
+     */
+    public function pendingReissue(string $requestId): ?array
+    {
+        return $this->pendingRequests[$requestId]['reissue'] ?? null;
+    }
+
+    /**
+     * Hold a frame for a machine to go out with the next flush, right after the `welcome`
+     * being answered now (flushHeldFrames()); under `$key`, so holding it twice sends it once.
+     *
+     * @param  array<string, mixed>  $frame
+     */
+    public function holdFrame(int|string $userId, string $key, array $frame): void
+    {
+        $this->heldFrames[(string) $userId][$key] = ['frame' => $frame, 'on_sent' => null, 'requires' => null, 'on_refused' => null];
     }
 
     /** The highest `seq` stored for a pending turn, 0 before the first (or when unknown). */

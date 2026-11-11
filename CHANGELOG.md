@@ -69,6 +69,13 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   (ai-bridge, same release) a frame lost to a server-side error no longer stalls the turn until a
   reconnect.
 
+- **A re-sent `session_lost` of the old run no longer ends the re-issued turn.** A bridge that
+  announces the new `continued_seq` in `hello` is sent `first_seq` (the error frame's `seq` + 1) on the
+  re-issued `ai_request` and numbers the new run on from there, so a re-send of the old run's frames
+  after a drop is a duplicate instead of a second `session_lost`. When the re-issue itself was lost in
+  the drop (the bridge's `running_turns` lists a `last_acked_seq` below the error frame), it is sent
+  again after the `welcome`. A bridge without `continued_seq` is treated as before (a re-issued run may
+  restart at 1). `BridgeConnectionManager::noteReissue()`, `pendingReissue()`, `holdFrame()`.
 - **A held transfer frame follows its transfer.** An `upload_offer` or `file_read` held through a
   short drop is now held under its transfer (`upload_offer:<id>`, `file_read:<id>`, as `upload_sent`
   already was) and dropped when the transfer fails while it is held (the browser went away, a clock
