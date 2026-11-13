@@ -236,6 +236,16 @@ class StreamHandler
      */
     private bool $storeBacklogFull = false;
 
+    /**
+     * Whether a store write that fails is kept to be tried again (deferStore()); null keeps it.
+     * Says no for a turn on a bridge without `reliable_delivery` (BridgeConnectionManager::registerPendingRequest()):
+     * such a turn is never ended for its kept writes, so a failed write is logged and dropped
+     * and the turn keeps streaming, as before writes were kept.
+     *
+     * @var (Closure(): bool)|null
+     */
+    private ?Closure $keepsFailedStoreWrites = null;
+
     /** @var list<Closure(self): void> run each time a write is kept (whenStoreDeferred()) */
     private array $storeDeferredCallbacks = [];
 
@@ -1425,6 +1435,22 @@ class StreamHandler
                 Log::warning('AI Bridge: a store-deferred callback failed', ['request_id' => $this->requestId, 'error' => $e->getMessage()]);
             }
         }
+    }
+
+    /** Whether a store write that fails now is kept to be tried again; see $keepsFailedStoreWrites. */
+    public function keepsFailedStoreWrites(): bool
+    {
+        return $this->keepsFailedStoreWrites === null || ($this->keepsFailedStoreWrites)();
+    }
+
+    /**
+     * Decide, at each failed store write, whether it is kept; see $keepsFailedStoreWrites.
+     *
+     * @param  Closure(): bool  $keep
+     */
+    public function keepFailedStoreWritesWhen(Closure $keep): void
+    {
+        $this->keepsFailedStoreWrites = $keep;
     }
 
     /**

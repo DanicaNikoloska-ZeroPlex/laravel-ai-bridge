@@ -2261,3 +2261,46 @@ test('a turn whose kept store writes reach their bound stops keeping more and is
     $this->messageHandler->tickUnconfirmedFrames(time() + 1);
     expect($rig->store->status($rig->rid)['status'])->toBe('failed');
 });
+
+test('a turn on a bridge without reliable_delivery drops a failed store write as before: it is not ended, sent no stream_ack, and later writes land once the store is back (D09710 review)', function () {
+    config([
+        'ai-bridge.websocket.stream_ack_interval' => 0,
+        'ai-bridge.websocket.stream_stall_seconds' => 60,
+        'ai-bridge.websocket.stream_store_backlog_writes' => 3,
+    ]);
+    $rig = bufferedRig($this);
+    $this->manager->setBridgeInfo('user-1', ['capabilities' => []]);
+    $errors = [];
+    $rig->handler->onError(function (string $code) use (&$errors) {
+        $errors[] = $code;
+    });
+    $unnumbered = fn (string $content): string => json_encode([
+        'type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::BLOCK_DELTA,
+        'data' => ['block_type' => 'text', 'block_index' => 0, 'content' => $content],
+    ]);
+
+    $this->messageHandler->handleMessage('conn-1', null, $unnumbered('a'));
+    $rig->store->down = true;
+    for ($i = 1; $i <= 10; $i++) {
+        $this->messageHandler->handleMessage('conn-1', null, $unnumbered("lost{$i}"));
+    }
+
+    // MUTATION: drop the reliable_delivery check in tickUnconfirmedFrames() / BufferingSink and the turn is ended.
+    $this->messageHandler->tickUnconfirmedFrames(time());
+    $this->messageHandler->tickUnconfirmedFrames(time() + 61);
+
+    expect($errors)->toBe([])
+        ->and($this->manager->getPendingRequest('req-1'))->toBe($rig->handler)
+        ->and($rig->handler->hasUnstored())->toBeFalse()
+        ->and(array_filter($rig->sent, fn (array $p) => $p['type'] === MessageTypes::STREAM_ACK))->toBe([]);
+
+    // The store is back: what comes next is stored, and the turn finishes.
+    $rig->store->down = false;
+    $this->messageHandler->handleMessage('conn-1', null, $unnumbered('b'));
+    $this->messageHandler->handleMessage('conn-1', null, json_encode(['type' => MessageTypes::STREAM, 'request_id' => 'req-1', 'event' => MessageTypes::DONE, 'data' => []]));
+
+    expect($rig->store->deltas($rig->rid))->toBe(['a', 'b'])
+        ->and($rig->store->status($rig->rid)['status'])->toBe('completed')
+        ->and($rig->done)->toBe(1)
+        ->and(array_filter($rig->sent, fn (array $p) => $p['type'] === MessageTypes::STREAM_ACK))->toBe([]);
+});

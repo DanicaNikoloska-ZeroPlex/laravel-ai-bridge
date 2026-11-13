@@ -1314,8 +1314,8 @@ class MessageHandler
      *    bounded by its grace period instead.
      * 3. An ended turn whose final frame could not be confirmed (its store writes kept) is
      *    let go of after the same bound, with a closed `stream_ack`.
-     * 4. A connected turn whose kept store writes reached their bound
-     *    (StreamHandler::deferStore()) is ended with `stream_stalled` at once.
+     * 4. A connected turn of a `reliable_delivery` bridge whose kept store writes reached their
+     *    bound (StreamHandler::deferStore()) is ended with `stream_stalled` at once.
      * 5. An ended turn's kept store writes, however it ended (an unnumbered `done`, a stall,
      *    a cancel, a drop), are tried again; after the same bound all but the writes that end
      *    it are given up and those are tried once more (StreamHandler::forceTerminalStore()),
@@ -1343,7 +1343,8 @@ class MessageHandler
                     }
                 }
 
-                if ($handler !== null && $handler->storeBacklogFull() && ! $this->connectionManager->isDetached($requestId)) {
+                if ($handler !== null && $handler->storeBacklogFull() && ! $this->connectionManager->isDetached($requestId)
+                    && $this->connectionManager->bridgeSupports($userId, 'reliable_delivery')) {
                     $full[$requestId] = true;
                 }
             }
@@ -1437,7 +1438,10 @@ class MessageHandler
 
         if ($userId !== null) {
             $this->connectionManager->rememberFinishedRequest($requestId, $userId, $confirmed);
-            $this->sendClosedAck($userId, $requestId, $confirmed);
+            // Only a reliable bridge may be sent a stream_ack (PROTOCOL.md, "Short drops").
+            if ($this->connectionManager->bridgeSupports($userId, 'reliable_delivery')) {
+                $this->sendClosedAck($userId, $requestId, $confirmed);
+            }
         }
     }
 

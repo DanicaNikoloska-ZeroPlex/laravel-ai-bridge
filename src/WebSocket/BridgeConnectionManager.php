@@ -913,6 +913,10 @@ class BridgeConnectionManager
             'detached_until' => null,
         ];
 
+        // Only a turn on a `reliable_delivery` bridge keeps a failed store write; any other
+        // drops it and streams on (StreamHandler::keepsFailedStoreWrites()).
+        $handler->keepFailedStoreWritesWhen(fn (): bool => $this->reachableBridgeSupports($userId, 'reliable_delivery'));
+
         // From now on a store write this turn has to keep (BufferingSink) is owned here, so
         // it is tried again after the turn ended on whichever path (unstoredHandlers()).
         $this->storeDeferredWatched ??= new \WeakMap();

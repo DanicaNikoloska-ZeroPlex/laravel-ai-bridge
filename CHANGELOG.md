@@ -60,8 +60,8 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   one-second tick (`MessageHandler::tickUnconfirmedFrames()`). Until then the numbered frame is not
   confirmed with `stream_ack`, so a `reliable_delivery` bridge keeps its copy; the frame is never
   processed a second time (the conversation recorder sees it once). A final frame is confirmed only
-  once its writes are done. Also for a bridge without `reliable_delivery`, a failed buffer write is
-  now written later instead of leaving a hole (nothing changes on the wire for it).
+  once its writes are done. A turn on a bridge without `reliable_delivery` keeps nothing: a failed
+  write is logged and dropped as before, and that turn is never ended or sent a `stream_ack` for it.
 - **A turn that can no longer be stored ends instead of hanging.** A connected turn that makes no
   progress for `ai-bridge.websocket.stream_stall_seconds` (new, default 60: a frame that fails on every
   re-send, a gap that is never filled, a stream store that stays down) is ended with the error
@@ -76,7 +76,7 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   (`StreamHandler::forceTerminalStore()`), so its buffer no longer stays `streaming`.
 - **The kept writes are bounded per turn.** New `ai-bridge.websocket.stream_store_backlog_bytes`
   (default 8 MiB) and `stream_store_backlog_writes` (default 2000); past either, no more is kept and a
-  connected turn is ended with `stream_stalled` on the next tick instead of after the stall bound.
+  connected turn of a `reliable_delivery` bridge is ended with `stream_stalled` on the next tick instead of after the stall bound.
 - **An appended event is not appended twice.** `RedisStreamStore::appendEvent()` no longer throws once
   `RPUSH` succeeded (a failed lifetime renewal is logged), so the retry of a kept write cannot duplicate
   a delta. A custom `StreamStoreContract` driver should throw only when the event was not appended.

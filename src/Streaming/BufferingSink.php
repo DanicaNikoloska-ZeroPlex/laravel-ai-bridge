@@ -229,6 +229,15 @@ final class BufferingSink
         try {
             $write();
         } catch (\Throwable $e) {
+            // A turn on a bridge without `reliable_delivery` drops the write, as before writes were kept.
+            if (! $handler->keepsFailedStoreWrites()) {
+                Log::error('AI Bridge: failed to buffer stream event', $context + [
+                    'error' => $e->getMessage(),
+                ]);
+
+                return;
+            }
+
             Log::error('AI Bridge: failed to buffer stream event; kept to write again', $context + [
                 'error' => $e->getMessage(),
             ]);

@@ -152,9 +152,10 @@ return [
          * re-sent and stored well before this.
          *
          * stream_store_backlog_bytes / stream_store_backlog_writes: how much of one turn's
-         * output may be kept while the stream store refuses it. Past either, no more is kept
-         * and the turn is ended with `stream_stalled` at once: a long outage must not let one
-         * turn exhaust the serve process every other user shares.
+         * output may be kept while the stream store refuses it (only a `reliable_delivery`
+         * bridge's turn keeps any). Past either, no more is kept and the turn is ended with
+         * `stream_stalled` at once: a long outage must not let one turn exhaust the serve
+         * process every other user shares.
          */
         'reconnect_grace_seconds' => (int) env('AI_BRIDGE_RECONNECT_GRACE_SECONDS', 120),
         'stream_ack_interval' => 1,
