@@ -123,6 +123,12 @@ a sentence for the person. The reasons:
 | `machine_gone`, `machine_stopped`, `upload_mismatch`, `file_refused`, `file_failed`, `unreachable` | 502 | The machine went away, misbehaved, or the serve process is not running. |
 | `client_gone` | 499 | The browser went away. |
 
+A machine whose bridge has `reliable_delivery` and drops for a moment is waited for, within
+`websocket.reconnect_grace_seconds`: a transfer in progress carries on (its bytes have their own
+connection), a new one is offered once the machine is back, and the 30-second clock starts then.
+Only when it does not come back in time does the transfer end with `machine_gone`
+(PROTOCOL.md, "Short drops").
+
 ## How it works, and why this way
 
 ```

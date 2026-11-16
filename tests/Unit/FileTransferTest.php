@@ -546,3 +546,171 @@ it('asks the bridge to keep handed-back files on the machine only when configure
     config()->set('ai-bridge.transfers.handed_back', 'device');
     expect($welcome()['config']['attachments'])->toBe('device');
 });
+
+// --- D09710 rework: a file hand-over waits out a short drop (#14256) ---------------
+
+/** transferRig() whose user-1 bridge announced reliable_delivery. */
+function reliableTransferRig(): object
+{
+    $rig = transferRig();
+    $rig->manager->setBridgeInfo('user-1', MessageHandler::bridgeInfoFromHello([
+        'file_uploads' => true, 'file_downloads' => true, 'capabilities' => ['reliable_delivery' => true],
+        'attachment_limits' => ['max_file_bytes' => 1000, 'max_total_bytes' => 5000, 'max_count' => 5],
+    ]));
+
+    return $rig;
+}
+
+/** The same bridge comes back: a new socket and its hello, then the held frames go out. */
+function reconnectMachine(object $rig): void
+{
+    $rig->manager->addConnection('user-1', 'conn-1b', 'sock-1b');
+    $rig->manager->setBridgeInfo('user-1', MessageHandler::bridgeInfoFromHello([
+        'file_uploads' => true, 'file_downloads' => true, 'capabilities' => ['reliable_delivery' => true],
+    ]));
+    $rig->manager->reattachRunningTurns('user-1', []);
+    $rig->manager->flushHeldFrames('user-1');
+}
+
+it('keeps an upload going through a short drop, and still tells the machine what passed', function () {
+    $rig = reliableTransferRig();
+    $worker = startUpload($rig, 3);
+    $id = frame($rig, MessageTypes::UPLOAD_OFFER)['id'];
+    $machine = machineGets($rig, $id);
+
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $worker->emit('data', ['abc']);
+
+    expect($worker->written)->toBe('')
+        ->and($rig->hub->inFlight())->toBe(1)
+        ->and($machine->response()[2])->toBe('abc')
+        ->and(frame($rig, MessageTypes::UPLOAD_SENT))->toBeNull();
+
+    reconnectMachine($rig);
+
+    expect(frame($rig, MessageTypes::UPLOAD_SENT)['id'])->toBe($id);
+});
+
+it('offers an upload started during a short drop once the machine is back, and starts the pickup clock then', function () {
+    $rig = reliableTransferRig();
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+
+    $worker = startUpload($rig, 3);
+    $uploads = new ReflectionProperty(TransferHub::class, 'uploads');
+    $id = array_key_first($uploads->getValue($rig->hub));
+
+    expect($worker->written)->toBe('')
+        ->and(frame($rig, MessageTypes::UPLOAD_OFFER))->toBeNull()
+        ->and($uploads->getValue($rig->hub)[$id]['timer'])->toBeNull();
+
+    reconnectMachine($rig);
+
+    expect(frame($rig, MessageTypes::UPLOAD_OFFER)['id'])->toBe($id)
+        ->and($uploads->getValue($rig->hub)[$id]['timer'])->not->toBeNull();
+});
+
+it('ends the transfers of a machine that does not come back within the grace period', function () {
+    config()->set('ai-bridge.websocket.reconnect_grace_seconds', 120);
+    $rig = reliableTransferRig();
+    $worker = startUpload($rig, 3);
+
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    expect($worker->written)->toBe('');
+
+    $rig->manager->expireDetachedRequests(time() + 121);
+
+    expect($worker->json()['code'])->toBe('machine_gone')->and($rig->hub->inFlight())->toBe(0);
+});
+
+it('starts the upload confirm clock when upload_sent is written after the reconnect, not while it is held (#14335)', function () {
+    $rig = reliableTransferRig();
+    $worker = startUpload($rig, 3);
+    $id = frame($rig, MessageTypes::UPLOAD_OFFER)['id'];
+    machineGets($rig, $id);
+    $uploads = new ReflectionProperty(TransferHub::class, 'uploads');
+
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $worker->emit('data', ['abc']);
+
+    expect(frame($rig, MessageTypes::UPLOAD_SENT))->toBeNull()
+        ->and($uploads->getValue($rig->hub)[$id]['timer'])->toBeNull();
+
+    reconnectMachine($rig);
+
+    expect(frame($rig, MessageTypes::UPLOAD_SENT)['id'])->toBe($id)
+        ->and($uploads->getValue($rig->hub)[$id]['timer'])->not->toBeNull();
+});
+
+// --- D09710 review follow-up: held transfer frames follow their transfer ---------------
+
+it('drops a held upload_offer when its upload fails during the drop: the machine is never offered it (review point 4)', function () {
+    $rig = reliableTransferRig();
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $worker = startUpload($rig, 3);
+
+    // The browser gives up while the offer is still held.
+    $worker->close();
+    expect($rig->hub->inFlight())->toBe(0);
+
+    reconnectMachine($rig);
+
+    expect(frame($rig, MessageTypes::UPLOAD_OFFER))->toBeNull()
+        ->and(frame($rig, MessageTypes::UPLOAD_ABORT))->toBeNull();
+});
+
+it('drops a held file_read when its download fails during the drop: the machine is never asked for it (review point 4)', function () {
+    $rig = reliableTransferRig();
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $worker = startDownload($rig);
+
+    $worker->close();
+
+    reconnectMachine($rig);
+
+    expect(frame($rig, MessageTypes::FILE_READ))->toBeNull()
+        ->and(frame($rig, MessageTypes::FILE_READ_CANCEL))->toBeNull();
+});
+
+it('fails a held upload, unsent, when an older bridge without file_uploads reconnects (review point 5)', function () {
+    $rig = reliableTransferRig();
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $worker = startUpload($rig, 3);
+
+    $rig->manager->addConnection('user-1', 'conn-1b', 'sock-1b');
+    $rig->manager->setBridgeInfo('user-1', MessageHandler::bridgeInfoFromHello([]));
+    $rig->manager->reattachRunningTurns('user-1', []);
+    $rig->manager->flushHeldFrames('user-1');
+
+    expect(frame($rig, MessageTypes::UPLOAD_OFFER))->toBeNull()
+        ->and($worker->response()[0])->toBe(409)
+        ->and($worker->json()['code'])->toBe('unsupported')
+        ->and($rig->hub->inFlight())->toBe(0);
+});
+
+it('fails a held download, unsent, when an older bridge without file_downloads reconnects (review point 5)', function () {
+    $rig = reliableTransferRig();
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    $worker = startDownload($rig);
+
+    $rig->manager->addConnection('user-1', 'conn-1b', 'sock-1b');
+    $rig->manager->setBridgeInfo('user-1', MessageHandler::bridgeInfoFromHello(['file_uploads' => true]));
+    $rig->manager->reattachRunningTurns('user-1', []);
+    $rig->manager->flushHeldFrames('user-1');
+
+    expect(frame($rig, MessageTypes::FILE_READ))->toBeNull()
+        ->and($worker->response()[0])->toBe(409)
+        ->and($worker->json()['code'])->toBe('unsupported');
+});
+
+it('still sends a held upload_offer to a reconnecting bridge that has file_uploads (review point 5)', function () {
+    $rig = reliableTransferRig();
+    $rig->manager->removeConnection('user-1', 'websocket_closed');
+    startUpload($rig, 3);
+
+    $rig->manager->addConnection('user-1', 'conn-1b', 'sock-1b');
+    $rig->manager->setBridgeInfo('user-1', MessageHandler::bridgeInfoFromHello(['file_uploads' => true]));
+    $rig->manager->reattachRunningTurns('user-1', []);
+    $rig->manager->flushHeldFrames('user-1');
+
+    expect(frame($rig, MessageTypes::UPLOAD_OFFER))->not->toBeNull();
+});

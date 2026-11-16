@@ -198,14 +198,28 @@ class BridgeWebSocketHandler
         if ($response !== null) {
             $from->send(json_encode($response));
         }
+
+        // Work held for this machine during a short drop goes out once its hello has been
+        // answered (the welcome above), never ahead of it.
+        if ($meta['user_id'] !== null) {
+            try {
+                $this->connectionManager->flushHeldFrames($meta['user_id']);
+            } catch (\Throwable $e) {
+                BridgeLog::error('could not send the frames held for a reconnected bridge', ['error' => $e->getMessage()]);
+            }
+        }
     }
 
     /**
      * Called when a WebSocket connection is closed.
      *
      * Cleans up connection tracking and fails any pending requests.
+     *
+     * `$closeCode` is the code of the bridge's close frame, when it sent one. 1000 (a normal
+     * close: the bridge is shutting down for good) is a deliberate stop, so the turns of a
+     * `reliable_delivery` bridge fail at once instead of waiting out the grace period.
      */
-    public function onClose(BridgeConnection $conn): void
+    public function onClose(BridgeConnection $conn, ?int $closeCode = null): void
     {
         $resourceId = $conn->resourceId;
         $meta = $this->connections[$resourceId] ?? null;
@@ -229,7 +243,7 @@ class BridgeWebSocketHandler
         if ($userId !== null) {
             $currentConnectionId = $this->connectionManager->getConnectionId($userId);
             if ($currentConnectionId === $connectionId) {
-                $this->connectionManager->removeConnection($userId, 'websocket_closed');
+                $this->connectionManager->removeConnection($userId, $closeCode === 1000 ? 'bridge_shutdown' : 'websocket_closed');
             } else {
                 Log::info('AI Bridge Server: stale connection closed after reconnect — skipping removeConnection', [
                     'closing_connection_id' => $connectionId,
