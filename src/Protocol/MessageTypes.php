@@ -81,6 +81,12 @@ final class MessageTypes
      */
     public const STREAM = 'stream';
 
+    /**
+     * Server → bridge: "every frame of this turn up to `seq` is stored" (cumulative).
+     * Sent only to a bridge that announced `reliable_delivery`; see PROTOCOL.md, "Short drops".
+     */
+    public const STREAM_ACK = 'stream_ack';
+
     /** Stream event: a new content block has started. */
     public const BLOCK_START = 'block_start';
 
@@ -336,6 +342,7 @@ final class MessageTypes
             self::AI_REQUEST_ACK,
             self::SESSION_RESET,
             self::STREAM,
+            self::STREAM_ACK,
             self::BLOCK_START,
             self::BLOCK_DELTA,
             self::BLOCK_STOP,
@@ -448,6 +455,7 @@ final class MessageTypes
             self::SESSION_RESET,
             self::TOOL_RESOLVE,
             self::TOOL_ERROR,
+            self::STREAM_ACK,
             self::USAGE_REQUEST,
             self::TURN_INPUT,
             self::UPLOAD_OFFER,

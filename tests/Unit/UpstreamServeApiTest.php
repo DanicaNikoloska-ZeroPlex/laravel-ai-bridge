@@ -328,3 +328,90 @@ describe('POST /api/request message', function () {
         expect($out->responses[0]['body']['error'])->toBe('missing_fields');
     })->with(['missing' => null, 'empty' => '']);
 });
+
+// --- D09710 rework: a held exchange never outlives its caller (#14334, #14336) ---
+
+/** serveRig() whose key-1 bridge announced reliable_delivery and is away on a short drop. */
+function droppedServeRig(float $timeout): object
+{
+    $rig = serveRig($timeout);
+    ($rig->from)('conn-1', ['type' => 'hello', 'version' => '0.1', 'providers' => [], 'capabilities' => ['reliable_delivery' => true],
+        'mcp_apps' => ['spec' => '2026-01-26', 'revision' => 1], 'mcp_upstream_auth' => ['revision' => 1]]);
+    $rig->sent = [];
+    $rig->manager->removeConnection('key-1', 'websocket_closed');
+
+    return $rig;
+}
+
+/** The same bridge comes back: a new socket and its hello, then the held frames go out. */
+function serveReconnect(object $rig, array $hello = ['capabilities' => ['reliable_delivery' => true],
+    'mcp_apps' => ['spec' => '2026-01-26', 'revision' => 1], 'mcp_upstream_auth' => ['revision' => 1]]): void
+{
+    $rig->manager->addConnection('key-1', 'conn-1b', 'socket-1b');
+    $rig->manager->setBridgeInfo('key-1', MessageHandler::bridgeInfoFromHello($hello));
+    $rig->manager->reattachRunningTurns('key-1', []);
+    $rig->manager->flushHeldFrames('key-1');
+}
+
+describe('an exchange held through a short drop', function () {
+    it('is sent after the reconnect while its caller still waits', function () {
+        $rig = droppedServeRig(5.0);
+        $out = servePost($rig, '/api/upstream/auth-start', ['server' => 'kaizen']);
+        expect($rig->sent)->toBe([]);
+
+        serveReconnect($rig);
+        ($rig->from)('conn-1b', ['type' => MessageTypes::UPSTREAM_AUTH_RESULT, 'server' => 'kaizen', 'ok' => false, 'code' => 'discovery_failed']);
+
+        expect($rig->sent)->toHaveCount(1)
+            ->and($out->responses[0]['body']['code'])->toBe('discovery_failed');
+    });
+
+    it('is dropped and answered not_connected when its caller\'s timeout passes first, and never sent (#14334)', function () {
+        $rig = droppedServeRig(0.05);
+        $out = servePost($rig, '/api/mcp', ['server' => 'weather', 'method' => 'tools/call', 'params' => ['name' => 'refresh']]);
+
+        $rig->loop->run();
+        expect($out->responses)->toHaveCount(1)
+            ->and($out->responses[0]['status'])->toBe(404)
+            ->and($out->responses[0]['body']['code'])->toBe('not_connected');
+
+        serveReconnect($rig);
+        expect($rig->sent)->toBe([]);
+    });
+
+    it('gives a second identical request its own clock, and keeps the frame for it when the first gives up (#14336)', function () {
+        $rig = droppedServeRig(0.2);
+        $a = servePost($rig, '/api/upstream/auth-start', ['server' => 'kaizen']);
+        $b = null;
+        $rig->loop->addTimer(0.1, function () use ($rig, &$b) {
+            $b = servePost($rig, '/api/upstream/auth-start', ['server' => 'kaizen']);
+        });
+        $rig->loop->addTimer(0.25, fn () => $rig->loop->stop());
+        $rig->loop->run();
+
+        expect($a->responses[0]['body']['code'])->toBe('not_connected')
+            ->and($b->responses)->toBe([]);
+
+        serveReconnect($rig);
+        ($rig->from)('conn-1b', ['type' => MessageTypes::UPSTREAM_AUTH_RESULT, 'server' => 'kaizen', 'ok' => false, 'code' => 'discovery_failed']);
+
+        expect($rig->sent)->toHaveCount(1)
+            ->and($b->responses)->toHaveCount(1)
+            ->and($b->responses[0]['body']['code'])->toBe('discovery_failed')
+            ->and($a->responses)->toHaveCount(1);
+    });
+});
+
+// --- D09710 review follow-up: held work is re-checked against the bridge that comes back ---
+
+it('does not send a held exchange to a reconnecting bridge without mcp_upstream_auth, and answers 409 at once (review point 5)', function () {
+    $rig = droppedServeRig(5.0);
+    $out = servePost($rig, '/api/upstream/auth-start', ['server' => 'kaizen']);
+
+    serveReconnect($rig, ['capabilities' => ['reliable_delivery' => true]]);
+
+    expect($rig->sent)->toBe([])
+        ->and($out->responses)->toHaveCount(1)
+        ->and($out->responses[0]['status'])->toBe(409)
+        ->and($out->responses[0]['body']['code'])->toBe('mcp_upstream_auth_unsupported');
+});

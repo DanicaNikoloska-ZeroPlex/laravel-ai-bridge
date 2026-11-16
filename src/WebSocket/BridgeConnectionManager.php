@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Log;
 use Tetrix\AiBridge\Contracts\SendableConnection;
 use Tetrix\AiBridge\Events\BridgeConnected;
 use Tetrix\AiBridge\Events\BridgeDisconnected;
+use Tetrix\AiBridge\Events\TurnLostAfterDrop;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Streaming\StreamHandler;
 
@@ -49,9 +50,68 @@ class BridgeConnectionManager
     /**
      * Map of request_id => pending request metadata.
      *
-     * @var array<string, array{stream_handler: StreamHandler, user_id: string}>
+     * `last_seq` is the highest `seq` processed for the turn (0 before the first; only a
+     * `reliable_delivery` bridge numbers its frames), `confirmed_seq` the highest that is also
+     * in the stream store and may be confirmed with `stream_ack` (at most `last_seq`),
+     * `stalled_since` the unix time the turn stopped making progress (a frame after a gap, a
+     * frame that failed, a store write kept for a retry; null while it makes progress),
+     * `seq_restart` that a re-issued turn may start numbering again from 1, and
+     * `detached_until` the unix time a turn detached by a drop fails at unless its bridge
+     * re-attaches it (null while attached).
+     *
+     * `reissue`, while set, is the `session_lost` re-issue of a bridge told to number it on
+     * (see noteReissue()).
+     *
+     * @var array<string, array{stream_handler: StreamHandler, user_id: string, carry: array<string, mixed>, last_seq: int, confirmed_seq: int, stalled_since: int|null, seq_restart: bool, detached_until: int|null, reissue?: array{frame: array<string, mixed>, error_seq: int}}>
      */
     private array $pendingRequests = [];
+
+    /**
+     * Turns that ended normally with a numbered final frame, by request id =>
+     * [user_id, final seq], the newest FINISHED_MEMORY entries. A bridge whose `stream_ack`
+     * for that final frame was lost in a drop re-sends it after reconnecting; this lets the
+     * server confirm it again instead of treating it as a turn it never knew.
+     *
+     * @var array<string, array{user_id: string, seq: int}>
+     */
+    private array $finishedRequests = [];
+
+    private const FINISHED_MEMORY = 500;
+
+    /**
+     * Users whose `reliable_delivery` bridge dropped for a transport reason and may still come
+     * back within the grace period, by user id => [unix time the wait ends, what the bridge
+     * said at its last hello]. Cleared by the next hello (reattachRunningTurns()), by a
+     * deliberate close, or when the period ends (expireDetachedRequests()).
+     *
+     * While a user is here, work for their machine waits instead of failing: see sendOrHold().
+     *
+     * @var array<string, array{until: int, bridge: array<string, mixed>}>
+     */
+    private array $awaitingReconnect = [];
+
+    /**
+     * Frames for a machine that is away (see $awaitingReconnect), by user id => key => frame
+     * and what to run once it is written. Sent, oldest first, after the bridge's next hello
+     * (flushHeldFrames()); dropped when the grace period ends, the waiters then being failed
+     * by their own registries.
+     *
+     * `requires` is what the bridge must announce at hello to be sent the frame (a capability
+     * such as `file_uploads`, or a hello field such as `mcp_apps`), checked against the bridge
+     * that comes back; `on_refused` fails its waiter when that bridge does not.
+     *
+     * @var array<string, array<string, array{frame: array<string, mixed>, on_sent: (callable(): void)|null, requires?: string|null, on_refused?: (callable(): void)|null}>>
+     */
+    private array $heldFrames = [];
+
+    private int $heldSequence = 0;
+
+    /**
+     * Why a connection closed, when that reason means the bridge may well come straight back.
+     * Only these detach a `reliable_delivery` bridge's turns; any other reason (a revoked
+     * connection, a bridge that shut down with a normal close) fails them at once.
+     */
+    private const TRANSPORT_DROP_REASONS = ['websocket_closed', 'websocket_error', 'replaced_by_new_connection'];
 
     /**
      * Usage questions waiting on an answer, keyed by the id that was sent.
@@ -66,7 +126,10 @@ class BridgeConnectionManager
      * another user's request id would answer that user's question. `pendingRequests` carries
      * `user_id` for exactly this reason and filters on it; this must too.
      *
-     * @var array<string, array{user_id: string, on_answer: callable(array<string, mixed>): void}>
+     * `frame` and `on_sent`, when given, let the question be put again after a short drop
+     * of a `reliable_delivery` bridge (see detachPendingRequestsForUser()).
+     *
+     * @var array<string, array{user_id: string, on_answer: callable(array<string, mixed>): void, frame: array<string, mixed>, on_sent: (callable(): void)|null}>
      */
     private array $pendingUsage = [];
 
@@ -78,7 +141,10 @@ class BridgeConnectionManager
      * user id is who the message was sent on behalf of, and only that user's
      * bridge may answer for it.
      *
-     * @var array<string, array{user_id: string, on_answer: callable(array<string, mixed>): void}>
+     * `frame` and `on_sent` as for `pendingUsage`: a bridge takes the same message_id once
+     * only, so sending it again after a drop cannot write it to the CLI twice.
+     *
+     * @var array<string, array{user_id: string, on_answer: callable(array<string, mixed>): void, frame: array<string, mixed>, on_sent: (callable(): void)|null}>
      */
     private array $pendingTurnInputs = [];
 
@@ -211,12 +277,52 @@ class BridgeConnectionManager
 
         $connectionId = $this->connections[$userId]['connection_id'];
 
-        // Fail any pending requests for this user
-        $this->failPendingRequestsForUser($userId, $reason);
+        // Fail any pending requests for this user; a bridge that announced reliable_delivery
+        // and dropped for a transport reason keeps them, detached, for the grace period (see
+        // detachPendingRequestsForUser()).
+        $detach = $this->keepsWorkThroughDrop($userId, $reason);
+
+        if ($detach) {
+            $this->detachPendingRequestsForUser($userId, $reason);
+        } else {
+            $this->failPendingRequestsForUser($userId, $reason);
+            $this->stopAwaitingReconnect($userId);
+        }
 
         unset($this->connections[$userId]);
         unset($this->connectionIdIndex[$connectionId]);
 
+        // A machine that may come back keeps its transfers too (their bytes travel on their
+        // own HTTP connections, not on this socket); they end when the grace period does.
+        if (! $detach) {
+            $this->notifyUserGone($userId);
+        }
+
+        Event::dispatch(new BridgeDisconnected($userId, $connectionId, $reason));
+    }
+
+    /**
+     * Whether a closing connection's work is kept for its bridge to come back: only for a
+     * transport-level reason (a dropped socket, a socket error, a reconnect replacing it), and
+     * only for a bridge that announced `reliable_delivery` — or one that had not said hello
+     * yet while an earlier drop of a reliable bridge is still waited on, so a reconnect that
+     * drops before its hello does not fail the turns held for the first drop.
+     */
+    private function keepsWorkThroughDrop(string $userId, ?string $reason): bool
+    {
+        if (! in_array($reason, self::TRANSPORT_DROP_REASONS, true)) {
+            return false;
+        }
+
+        if ($this->bridgeSupports($userId, 'reliable_delivery')) {
+            return true;
+        }
+
+        return ! isset($this->connections[$userId]['bridge']) && isset($this->awaitingReconnect[$userId]);
+    }
+
+    private function notifyUserGone(string $userId): void
+    {
         foreach ($this->userGoneListeners as $listener) {
             try {
                 $listener($userId);
@@ -224,8 +330,231 @@ class BridgeConnectionManager
                 // A listener must not stop the connection being removed.
             }
         }
+    }
 
-        Event::dispatch(new BridgeDisconnected($userId, $connectionId, $reason));
+    /** Whether this user's `reliable_delivery` bridge dropped and is still waited for. */
+    public function isAwaitingReconnect(int|string $userId): bool
+    {
+        return isset($this->awaitingReconnect[(string) $userId]);
+    }
+
+    /** Whether work can be given to this user's machine: it is connected, or a short drop is waited out. */
+    public function canReach(int|string $userId): bool
+    {
+        return $this->hasConnection($userId) || $this->isAwaitingReconnect($userId);
+    }
+
+    /**
+     * What this user's bridge said at `hello`: from the live connection, or, while a short
+     * drop is waited out, from the connection that dropped.
+     *
+     * @return array<string, mixed>
+     */
+    public function reachableBridgeInfo(int|string $userId): array
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->connections[$userId]['bridge'])) {
+            return $this->connections[$userId]['bridge'];
+        }
+
+        return $this->awaitingReconnect[$userId]['bridge'] ?? [];
+    }
+
+    /**
+     * Whether this user's connected bridge announced `$requirement` at hello: a capability
+     * (bridgeSupports()), or a hello field it sends only when it can (`mcp_apps`,
+     * `mcp_upstream_auth`).
+     */
+    public function bridgeHas(int|string $userId, string $requirement): bool
+    {
+        return $this->bridgeSupports($userId, $requirement)
+            || is_array($this->getBridgeInfo($userId)[$requirement] ?? null);
+    }
+
+    /** bridgeSupports(), also while a short drop is waited out (see reachableBridgeInfo()). */
+    public function reachableBridgeSupports(int|string $userId, string $capability): bool
+    {
+        return in_array($capability, $this->reachableBridgeInfo($userId)['capabilities'] ?? [], true);
+    }
+
+    /**
+     * Send a frame to a user's machine now, or, while its `reliable_delivery` bridge is away
+     * on a short drop, hold it and send it after the bridge's next hello.
+     *
+     * `$onSent` runs once the frame is written (at once, or after the reconnect). A caller
+     * that holds an HTTP request open for the answer starts its clock at the request instead,
+     * and drops the frame with dropHeldFrame() when that clock ends while it is still held
+     * (PROTOCOL.md, "Short drops"). A frame still held when the grace period ends is dropped; whoever
+     * waits on its answer is failed then by its own registry (usage, turn input, exchange) or
+     * by the user-gone listeners (transfers).
+     *
+     * `$key` names a frame that may be held twice (a re-send of one already out), or one its
+     * caller may have to drop (dropHeldFrame()): a second frame under the same key replaces
+     * the first.
+     *
+     * `$requires` is what the frame needs the bridge to have announced (see bridgeHas()). A
+     * held frame is sent after the reconnect only when the bridge that came back announced it
+     * too, which an older bridge taking the machine's place may not have; otherwise it is
+     * dropped unsent and `$onRefused` runs, so its waiter is failed at once (PROTOCOL.md,
+     * "Short drops").
+     *
+     * @param  array<string, mixed>  $frame
+     * @param  (callable(): void)|null  $onSent
+     * @param  (callable(): void)|null  $onRefused
+     * @return bool  False only when the machine is neither connected nor waited for, or the
+     *               write failed.
+     */
+    public function sendOrHold(int|string $userId, array $frame, ?callable $onSent = null, ?string $key = null, ?string $requires = null, ?callable $onRefused = null): bool
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->awaitingReconnect[$userId])) {
+            $this->heldFrames[$userId][$key ?? 'held:'.(++$this->heldSequence)] = [
+                'frame' => $frame, 'on_sent' => $onSent, 'requires' => $requires, 'on_refused' => $onRefused,
+            ];
+
+            return true;
+        }
+
+        if (! $this->sendToUser($userId, $frame)) {
+            return false;
+        }
+
+        if ($onSent !== null) {
+            $onSent();
+        }
+
+        return true;
+    }
+
+    /**
+     * Send what was held for a machine during its drop, now that its bridge said hello again.
+     * Run after the `welcome` is written (BridgeWebSocketHandler), and on the one-second tick.
+     * Stops at the first frame that cannot be written, keeping it and the rest held.
+     *
+     * A frame the bridge that came back cannot handle (it did not announce what the frame
+     * `requires`, see sendOrHold()) is not sent: it is dropped and its waiter failed.
+     *
+     * @return int how many frames were sent
+     */
+    public function flushHeldFrames(int|string $userId): int
+    {
+        $userId = (string) $userId;
+        $sent = 0;
+
+        if (isset($this->awaitingReconnect[$userId]) || ! $this->hasConnection($userId)) {
+            return 0;
+        }
+
+        foreach ($this->heldFrames[$userId] ?? [] as $key => $held) {
+            // Dropped meanwhile by the callback of a frame before it.
+            if (! isset($this->heldFrames[$userId][$key])) {
+                continue;
+            }
+
+            $requires = $held['requires'] ?? null;
+            if ($requires !== null && ! $this->bridgeHas($userId, $requires)) {
+                unset($this->heldFrames[$userId][$key]);
+                Log::info('AI Bridge: a held frame is not sent: the bridge that reconnected does not support it', [
+                    'user_id' => $userId,
+                    'type' => $held['frame']['type'] ?? null,
+                    'requires' => $requires,
+                ]);
+
+                if (($held['on_refused'] ?? null) !== null) {
+                    try {
+                        ($held['on_refused'])();
+                    } catch (\Throwable $e) {
+                        Log::warning('AI Bridge: a refused held frame\'s callback failed', ['error' => $e->getMessage()]);
+                    }
+                }
+
+                continue;
+            }
+
+            if (! $this->sendToUser($userId, $held['frame'])) {
+                break;
+            }
+
+            unset($this->heldFrames[$userId][$key]);
+            $sent++;
+
+            if ($held['on_sent'] !== null) {
+                try {
+                    ($held['on_sent'])();
+                } catch (\Throwable $e) {
+                    Log::warning('AI Bridge: a held frame\'s on-sent callback failed', ['error' => $e->getMessage()]);
+                }
+            }
+        }
+
+        if (($this->heldFrames[$userId] ?? null) === []) {
+            unset($this->heldFrames[$userId]);
+        }
+
+        return $sent;
+    }
+
+    /** flushHeldFrames() for every user that has something held. */
+    public function flushAllHeldFrames(): int
+    {
+        $sent = 0;
+
+        foreach (array_keys($this->heldFrames) as $userId) {
+            $sent += $this->flushHeldFrames((string) $userId);
+        }
+
+        return $sent;
+    }
+
+    /** Whether a frame is held under `$key` for this user's machine (see sendOrHold()). */
+    public function isHeldFrame(int|string $userId, string $key): bool
+    {
+        return isset($this->heldFrames[(string) $userId][$key]);
+    }
+
+    /**
+     * Drop a frame held under `$key` because its caller has given up (its own timeout passed,
+     * measured from its request): a held item never outlives its caller, so it is never sent
+     * after the caller was told it was not delivered.
+     *
+     * @return bool  True when the frame was still held (never written since the drop).
+     */
+    public function dropHeldFrame(int|string $userId, string $key): bool
+    {
+        $held = $this->isHeldFrame($userId, $key);
+        $this->forgetHeldFrame((string) $userId, $key);
+
+        return $held;
+    }
+
+    /** Forget a held frame whose waiter has been answered or has given up. */
+    private function forgetHeldFrame(string $userId, string $key): void
+    {
+        unset($this->heldFrames[$userId][$key]);
+
+        if (($this->heldFrames[$userId] ?? null) === []) {
+            unset($this->heldFrames[$userId]);
+        }
+    }
+
+    /** The machine is not waited for any more: drop what was held for it. */
+    private function stopAwaitingReconnect(string $userId): void
+    {
+        unset($this->awaitingReconnect[$userId], $this->heldFrames[$userId]);
+    }
+
+    /** The key a usage question is held under while its machine is away (see sendOrHold()). */
+    public static function usageHoldKey(string $requestId): string
+    {
+        return 'usage:'.$requestId;
+    }
+
+    /** The key a mid-turn message is held under while its machine is away (see sendOrHold()). */
+    public static function turnInputHoldKey(string $requestId, string $messageId): string
+    {
+        return 'turn_input:'.self::turnInputKey($requestId, $messageId);
     }
 
     /**
@@ -366,7 +695,7 @@ class BridgeConnectionManager
 
     /**
      * Whether this user's connected bridge announced a capability at `hello`
-     * (`turn_input`, `input_closed`, `file_uploads`, `file_downloads`, `app_backends`).
+     * (`turn_input`, `input_closed`, `file_uploads`, `file_downloads`, `app_backends`, `reliable_delivery`).
      */
     public function bridgeSupports(int|string $userId, string $capability): bool
     {
@@ -598,7 +927,384 @@ class BridgeConnectionManager
             'stream_handler' => $handler,
             'user_id' => $userId,
             'carry' => $carry,
+            'last_seq' => 0,
+            'confirmed_seq' => 0,
+            'stalled_since' => null,
+            'seq_restart' => false,
+            'detached_until' => null,
         ];
+
+        // Only a turn on a `reliable_delivery` bridge keeps a failed store write; any other
+        // drops it and streams on (StreamHandler::keepsFailedStoreWrites()).
+        $handler->keepFailedStoreWritesWhen(fn (): bool => $this->reachableBridgeSupports($userId, 'reliable_delivery'));
+
+        // From now on a store write this turn has to keep (BufferingSink) is owned here, so
+        // it is tried again after the turn ended on whichever path (unstoredHandlers()).
+        $this->storeDeferredWatched ??= new \WeakMap();
+        if (! isset($this->storeDeferredWatched[$handler])) {
+            $this->storeDeferredWatched[$handler] = true;
+            $handler->whenStoreDeferred(function (StreamHandler $kept): void {
+                $this->unstoredHandlers[spl_object_id($kept)] = $kept;
+            });
+        }
+    }
+
+    /**
+     * Turn handlers with store writes kept to be tried again, by object id, whether their turn
+     * is still pending or ended (on any path: its final frame, an unnumbered `done`, a stall, a
+     * cancel, a drop). MessageHandler::tickUnconfirmedFrames() tries them again and, after
+     * `stream_stall_seconds`, gives up on all but the writes that end the turn, so its buffer
+     * never stays `streaming`.
+     *
+     * @var array<int, StreamHandler>
+     */
+    private array $unstoredHandlers = [];
+
+    /**
+     * Handlers whose kept writes are reported to $unstoredHandlers (weak: one registered
+     * again, for a re-issue, is not watched twice, and a finished one is not held on to).
+     *
+     * @var \WeakMap<StreamHandler, true>|null
+     */
+    private ?\WeakMap $storeDeferredWatched = null;
+
+    /** @return list<StreamHandler> handlers with store writes kept (see $unstoredHandlers) */
+    public function unstoredHandlers(): array
+    {
+        return array_values($this->unstoredHandlers);
+    }
+
+    /** Stop tracking a handler whose kept writes are done or given up on. */
+    public function forgetUnstoredHandler(StreamHandler $handler): void
+    {
+        unset($this->unstoredHandlers[spl_object_id($handler)]);
+    }
+
+    /** What a numbered frame is to its turn; see acceptSeq(). */
+    public const SEQ_STORE = 'store';
+
+    public const SEQ_DUPLICATE = 'duplicate';
+
+    public const SEQ_GAP = 'gap';
+
+    /**
+     * Decide whether a numbered `stream` frame of a pending turn is to be stored. Records
+     * nothing: the caller stores it with commitSeq() only once the frame was processed
+     * without an error, so a frame lost to a processing error is stored when it is re-sent
+     * rather than dropped as a duplicate of itself.
+     *
+     * Stored only when `seq` is exactly one more than the last stored for that turn (or 1
+     * right after a `session_lost` re-issue, see allowSeqRestart()). At or below it is a
+     * re-send the server already has (SEQ_DUPLICATE, safe to drop); above it a frame went
+     * missing (SEQ_GAP): it is not stored, and the bridge re-sends in order after it
+     * reconnects. An unknown request is SEQ_GAP too: nothing can be stored for it here.
+     */
+    public function acceptSeq(string $requestId, int $seq): string
+    {
+        if (! isset($this->pendingRequests[$requestId])) {
+            return self::SEQ_GAP;
+        }
+
+        $entry = $this->pendingRequests[$requestId];
+        $last = $entry['last_seq'] ?? 0;
+
+        if (($entry['seq_restart'] ?? false) && ($seq === 1 || $seq === $last + 1)) {
+            return self::SEQ_STORE;
+        }
+
+        if ($seq <= $last) {
+            return self::SEQ_DUPLICATE;
+        }
+
+        return $seq > $last + 1 ? self::SEQ_GAP : self::SEQ_STORE;
+    }
+
+    /** A frame acceptSeq() said to store has been processed: count it as stored. */
+    public function commitSeq(string $requestId, int $seq): void
+    {
+        if (isset($this->pendingRequests[$requestId])) {
+            $this->pendingRequests[$requestId]['last_seq'] = $seq;
+            $this->pendingRequests[$requestId]['seq_restart'] = false;
+
+            // The re-issued run has said something: its ai_request arrived.
+            if ($seq > ($this->pendingRequests[$requestId]['reissue']['error_seq'] ?? PHP_INT_MAX)) {
+                unset($this->pendingRequests[$requestId]['reissue']);
+            }
+        }
+    }
+
+    /**
+     * A pending turn was re-issued (`session_lost`) to a bridge told to number it on from
+     * `first_seq`: keep the `ai_request` until the new run's first frame is stored, so it can
+     * be sent again when the connection dropped before the bridge saw it (see
+     * MessageHandler::reattachRunningTurns()).
+     *
+     * @param  array<string, mixed>  $frame
+     */
+    public function noteReissue(string $requestId, array $frame, int $errorSeq): void
+    {
+        if (isset($this->pendingRequests[$requestId])) {
+            $this->pendingRequests[$requestId]['reissue'] = ['frame' => $frame, 'error_seq' => $errorSeq];
+        }
+    }
+
+    /**
+     * The re-issue of a pending turn whose new run has not sent a frame yet, or null.
+     *
+     * @return array{frame: array<string, mixed>, error_seq: int}|null
+     */
+    public function pendingReissue(string $requestId): ?array
+    {
+        return $this->pendingRequests[$requestId]['reissue'] ?? null;
+    }
+
+    /**
+     * Hold a frame for a machine to go out with the next flush, right after the `welcome`
+     * being answered now (flushHeldFrames()); under `$key`, so holding it twice sends it once.
+     *
+     * @param  array<string, mixed>  $frame
+     */
+    public function holdFrame(int|string $userId, string $key, array $frame): void
+    {
+        $this->heldFrames[(string) $userId][$key] = ['frame' => $frame, 'on_sent' => null, 'requires' => null, 'on_refused' => null];
+    }
+
+    /** The highest `seq` stored for a pending turn, 0 before the first (or when unknown). */
+    public function lastStoredSeq(string $requestId): int
+    {
+        return $this->pendingRequests[$requestId]['last_seq'] ?? 0;
+    }
+
+    /**
+     * Everything up to `$seq` of a pending turn is processed and in the stream store: it may
+     * be confirmed to the bridge, and the turn is making progress again.
+     */
+    public function confirmSeq(string $requestId, int $seq): void
+    {
+        if (isset($this->pendingRequests[$requestId])) {
+            $this->pendingRequests[$requestId]['confirmed_seq'] = $seq;
+            $this->pendingRequests[$requestId]['stalled_since'] = null;
+        }
+    }
+
+    /** The highest `seq` of a pending turn that may be confirmed (see confirmSeq()), 0 when none. */
+    public function confirmedSeq(string $requestId): int
+    {
+        return $this->pendingRequests[$requestId]['confirmed_seq'] ?? 0;
+    }
+
+    /**
+     * A pending turn did not make progress on a frame (one after a gap, one that failed, one
+     * whose store write is kept for a retry). The first such moment is kept: the stall bound
+     * (MessageHandler::tickUnconfirmedFrames()) counts from it until confirmSeq().
+     */
+    public function markStalled(string $requestId, ?int $now = null): void
+    {
+        if (isset($this->pendingRequests[$requestId]) && $this->pendingRequests[$requestId]['stalled_since'] === null) {
+            $this->pendingRequests[$requestId]['stalled_since'] = $now ?? time();
+        }
+    }
+
+    /**
+     * The attached pending turns that have not made progress since `$since` or before. A
+     * detached turn is not among them: its grace period is what bounds it.
+     *
+     * @return list<string>
+     */
+    public function stalledRequestIds(int $since): array
+    {
+        return array_map('strval', array_keys(array_filter(
+            $this->pendingRequests,
+            static fn (array $entry): bool => ($entry['stalled_since'] ?? null) !== null
+                && $entry['stalled_since'] <= $since
+                && ($entry['detached_until'] ?? null) === null,
+        )));
+    }
+
+    /**
+     * A pending turn was re-issued under the same request id (`session_lost`): its next frame
+     * may number from 1 again, or carry on from the last stored.
+     */
+    public function allowSeqRestart(string $requestId): void
+    {
+        if (isset($this->pendingRequests[$requestId])) {
+            $this->pendingRequests[$requestId]['seq_restart'] = true;
+        }
+    }
+
+    /** Remember the final `seq` of a turn that has ended, for a re-send of it (see $finishedRequests). */
+    public function rememberFinishedRequest(string $requestId, int|string $userId, int $seq): void
+    {
+        unset($this->finishedRequests[$requestId]);
+        $this->finishedRequests[$requestId] = ['user_id' => (string) $userId, 'seq' => $seq];
+
+        while (count($this->finishedRequests) > self::FINISHED_MEMORY) {
+            unset($this->finishedRequests[array_key_first($this->finishedRequests)]);
+        }
+    }
+
+    /** The final `seq` of a turn of this user that has ended, or null. */
+    public function finishedRequestSeq(string $requestId, int|string $userId): ?int
+    {
+        $entry = $this->finishedRequests[$requestId] ?? null;
+
+        return $entry !== null && $entry['user_id'] === (string) $userId ? $entry['seq'] : null;
+    }
+
+    /** Whether a pending turn is detached: its bridge dropped and has not re-attached it yet. */
+    public function isDetached(string $requestId): bool
+    {
+        return ($this->pendingRequests[$requestId]['detached_until'] ?? null) !== null;
+    }
+
+    /**
+     * The ids of the detached turns a user owns.
+     *
+     * @return string[]
+     */
+    public function detachedRequestIdsForUser(int|string $userId): array
+    {
+        $needle = (string) $userId;
+
+        return array_map('strval', array_keys(array_filter(
+            $this->pendingRequests,
+            static fn (array $entry): bool => (string) $entry['user_id'] === $needle && ($entry['detached_until'] ?? null) !== null,
+        )));
+    }
+
+    /** How long a detached turn waits for its bridge, in seconds (`welcome.config.reconnect_grace_seconds`). */
+    public static function reconnectGraceSeconds(): int
+    {
+        return max(0, (int) config('ai-bridge.websocket.reconnect_grace_seconds', 120));
+    }
+
+    /**
+     * A `reliable_delivery` bridge said hello again: re-attach the detached turns it lists in
+     * `running_turns`, and fail at once, with `bridge_disconnected`, every detached turn of
+     * this user it does not list (the machine no longer runs it).
+     *
+     * A listed turn that is not detached (never was, or is unknown here) is left alone.
+     * Ends the wait for this machine either way (see $awaitingReconnect).
+     *
+     * @param  list<string>  $runningRequestIds  The `request_id`s of `hello.running_turns`.
+     * @return array{reattached: list<string>, failed: list<string>}
+     */
+    public function reattachRunningTurns(int|string $userId, array $runningRequestIds): array
+    {
+        $userId = (string) $userId;
+        $reattached = [];
+        $failed = [];
+
+        // The machine is back: what was held for it goes out once the welcome has
+        // (flushHeldFrames()), and new work is sent straight away again.
+        unset($this->awaitingReconnect[$userId]);
+
+        foreach ($this->detachedRequestIdsForUser($userId) as $requestId) {
+            if (in_array($requestId, $runningRequestIds, true)) {
+                $this->pendingRequests[$requestId]['detached_until'] = null;
+                // A stall seen before the drop is counted again from now: the bridge re-sends
+                // what was not confirmed right after this hello.
+                if ($this->pendingRequests[$requestId]['stalled_since'] !== null) {
+                    $this->pendingRequests[$requestId]['stalled_since'] = time();
+                }
+                $reattached[] = $requestId;
+            } else {
+                $this->failDetachedRequest($requestId, TurnLostAfterDrop::NOT_LISTED);
+                $failed[] = $requestId;
+            }
+        }
+
+        if ($reattached !== [] || $failed !== []) {
+            Log::info('AI Bridge: bridge reconnected; detached turns re-attached or failed', [
+                'user_id' => $userId,
+                'reattached' => $reattached,
+                'failed' => $failed,
+            ]);
+        }
+
+        return ['reattached' => $reattached, 'failed' => $failed];
+    }
+
+    /**
+     * Fail every detached turn whose grace period has passed without its bridge coming back,
+     * and everything else that waited for that machine (see giveUpOnReconnect()).
+     *
+     * Called on a one-second timer by the serve process (BridgeWebSocketServer), the only
+     * process that holds these turns.
+     *
+     * @return int how many turns were failed
+     */
+    public function expireDetachedRequests(?int $now = null): int
+    {
+        $now ??= time();
+        $failed = 0;
+
+        foreach ($this->pendingRequests as $requestId => $entry) {
+            $until = $entry['detached_until'] ?? null;
+
+            if ($until !== null && $until <= $now) {
+                $this->failDetachedRequest((string) $requestId, TurnLostAfterDrop::GRACE_EXPIRED);
+                $failed++;
+            }
+        }
+
+        foreach ($this->awaitingReconnect as $userId => $awaiting) {
+            if ($awaiting['until'] <= $now) {
+                $this->giveUpOnReconnect((string) $userId);
+            }
+        }
+
+        return $failed;
+    }
+
+    /**
+     * What a person is told when a turn is lost after a drop, in plain words, per reason.
+     * The code stays `bridge_disconnected`; the event carries the reason for an application
+     * that words its own line.
+     */
+    public static function lostAfterDropMessage(string $reason): string
+    {
+        return $reason === TurnLostAfterDrop::NOT_LISTED
+            ? 'The connection to your machine dropped. It came back, but it was no longer working on this reply (it may have restarted), so the reply stopped here and the rest of it was not saved. Send your message again to continue.'
+            : 'The connection to your machine dropped and it did not come back within '.self::reconnectGraceSeconds().' seconds, so the reply stopped here and the rest of it was not saved. Send your message again to continue.';
+    }
+
+    /** End a detached turn as lost: `bridge_disconnected` to its handler, then TurnLostAfterDrop. */
+    private function failDetachedRequest(string $requestId, string $reason): void
+    {
+        $entry = $this->pendingRequests[$requestId] ?? null;
+
+        if ($entry === null) {
+            return;
+        }
+
+        unset($this->pendingRequests[$requestId]);
+        $userId = (string) $entry['user_id'];
+        $this->rememberDroppedRequest($requestId, $userId);
+
+        $conversationId = '';
+
+        try {
+            $conversationId = $entry['stream_handler']->getConversationId();
+            $entry['stream_handler']->dispatchError('bridge_disconnected', self::lostAfterDropMessage($reason));
+        } catch (\Throwable $e) {
+            Log::warning('AI Bridge: could not end a detached turn', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        Log::info('AI Bridge: detached turn lost', ['request_id' => $requestId, 'user_id' => $userId, 'reason' => $reason]);
+
+        try {
+            Event::dispatch(new TurnLostAfterDrop($requestId, $userId, $conversationId, $reason));
+        } catch (\Throwable $e) {
+            // A listener must not stop the next turn being failed.
+            Log::warning('AI Bridge: a TurnLostAfterDrop listener failed', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -619,12 +1325,16 @@ class BridgeConnectionManager
      * @param  string  $userId  The user the question is being asked on behalf of. Only that
      *                          user's bridge may answer it.
      * @param  callable(array<string, mixed>): void  $onAnswer
+     * @param  array<string, mixed>  $frame  The `usage_request` frame, to put it again after a short drop.
+     * @param  (callable(): void)|null  $onSent  Run each time that frame is written (see sendOrHold()).
      */
-    public function registerPendingUsage(string $requestId, string $userId, callable $onAnswer): void
+    public function registerPendingUsage(string $requestId, string $userId, callable $onAnswer, array $frame = [], ?callable $onSent = null): void
     {
         $this->pendingUsage[$requestId] = [
             'user_id' => $userId,
             'on_answer' => $onAnswer,
+            'frame' => $frame,
+            'on_sent' => $onSent,
         ];
     }
 
@@ -658,6 +1368,7 @@ class BridgeConnectionManager
         }
 
         unset($this->pendingUsage[$requestId]);
+        $this->forgetHeldFrame($userId, self::usageHoldKey($requestId));
 
         ($pending['on_answer'])($answer);
 
@@ -687,7 +1398,12 @@ class BridgeConnectionManager
     /** Give up on a usage question (the bridge never answered). */
     public function forgetPendingUsage(string $requestId): void
     {
+        $userId = $this->pendingUsage[$requestId]['user_id'] ?? null;
         unset($this->pendingUsage[$requestId]);
+
+        if ($userId !== null) {
+            $this->forgetHeldFrame($userId, self::usageHoldKey($requestId));
+        }
     }
 
     /**
@@ -696,12 +1412,16 @@ class BridgeConnectionManager
      * @param  string  $userId  The user the message was sent on behalf of. Only that user's
      *                          bridge may acknowledge it.
      * @param  callable(array<string, mixed>): void  $onAnswer  Receives `{status, reason?}`.
+     * @param  array<string, mixed>  $frame  The `turn_input` frame, to send it again after a short drop.
+     * @param  (callable(): void)|null  $onSent  Run each time that frame is written (see sendOrHold()).
      */
-    public function registerPendingTurnInput(string $requestId, string $messageId, string $userId, callable $onAnswer): void
+    public function registerPendingTurnInput(string $requestId, string $messageId, string $userId, callable $onAnswer, array $frame = [], ?callable $onSent = null): void
     {
         $this->pendingTurnInputs[self::turnInputKey($requestId, $messageId)] = [
             'user_id' => $userId,
             'on_answer' => $onAnswer,
+            'frame' => $frame,
+            'on_sent' => $onSent,
         ];
     }
 
@@ -739,6 +1459,7 @@ class BridgeConnectionManager
         }
 
         unset($this->pendingTurnInputs[$key]);
+        $this->forgetHeldFrame($userId, self::turnInputHoldKey($requestId, $messageId));
 
         ($pending['on_answer'])($answer);
 
@@ -748,7 +1469,13 @@ class BridgeConnectionManager
     /** Give up on a mid-turn message (the bridge never answered). */
     public function forgetPendingTurnInput(string $requestId, string $messageId): void
     {
-        unset($this->pendingTurnInputs[self::turnInputKey($requestId, $messageId)]);
+        $key = self::turnInputKey($requestId, $messageId);
+        $userId = $this->pendingTurnInputs[$key]['user_id'] ?? null;
+        unset($this->pendingTurnInputs[$key]);
+
+        if ($userId !== null) {
+            $this->forgetHeldFrame($userId, self::turnInputHoldKey($requestId, $messageId));
+        }
     }
 
     /**
@@ -757,8 +1484,12 @@ class BridgeConnectionManager
      * `no_answer`, not `turn_not_running`: the bridge never said whether it took the message,
      * and the one answer that must never be given without its word is one that makes the
      * caller send it again as a new turn.
+     *
+     * `connection_lost` instead when a `reliable_delivery` bridge dropped and did not come
+     * back within the grace period: its turn has ended too, and the caller must not take the
+     * message as delivered (PROTOCOL.md, "Short drops").
      */
-    private function failPendingTurnInputsForUser(string $userId): void
+    private function failPendingTurnInputsForUser(string $userId, string $reason = 'no_answer'): void
     {
         foreach ($this->pendingTurnInputs as $key => $pending) {
             if ($pending['user_id'] !== $userId) {
@@ -767,7 +1498,7 @@ class BridgeConnectionManager
 
             unset($this->pendingTurnInputs[$key]);
 
-            ($pending['on_answer'])(['status' => 'rejected', 'reason' => 'no_answer']);
+            ($pending['on_answer'])(['status' => 'rejected', 'reason' => $reason]);
         }
     }
 
@@ -1101,6 +1832,117 @@ class BridgeConnectionManager
         }
 
         return $ended;
+    }
+
+    /**
+     * A `reliable_delivery` bridge dropped (a transport reason, see keepsWorkThroughDrop()):
+     * keep its turns pending, detached, for `reconnect_grace_seconds` instead of failing them.
+     * The machine keeps running them and holds their frames; its next `hello` re-attaches them
+     * (reattachRunningTurns()), and one it does not list, or one still detached when the period
+     * ends (expireDetachedRequests()), fails with `bridge_disconnected`.
+     *
+     * The other work for the machine waits for the reconnect as well (PROTOCOL.md, "Short
+     * drops"): a usage question or mid-turn message already out is put again after the next
+     * hello (both are safe to repeat), new ones are held (sendOrHold()), and transfers carry on
+     * on their own connections. Only an exchange already out (an `mcp_request`, an upstream
+     * sign-in step) fails at once, as before: it may have run, and running it again is not
+     * safe. All of it fails when the grace period ends without the machine.
+     *
+     * A second drop before the reconnect's hello changes nothing that is already waiting.
+     */
+    private function detachPendingRequestsForUser(string $userId, ?string $reason = null): void
+    {
+        $until = time() + self::reconnectGraceSeconds();
+        $detached = [];
+
+        foreach ($this->pendingRequests as $requestId => $entry) {
+            if ($entry['user_id'] === $userId && ($entry['detached_until'] ?? null) === null) {
+                $this->pendingRequests[$requestId]['detached_until'] = $until;
+                $detached[] = (string) $requestId;
+            }
+        }
+
+        if ($detached !== []) {
+            Log::info('AI Bridge: bridge dropped; turns detached for the grace period', [
+                'user_id' => $userId,
+                'reason' => $reason,
+                'request_ids' => $detached,
+                'detached_until' => $until,
+            ]);
+        }
+
+        if (isset($this->awaitingReconnect[$userId])) {
+            // Dropped again before the reconnect said hello: nothing was sent on that
+            // connection (sendOrHold() kept holding), so what waits keeps waiting.
+            return;
+        }
+
+        $this->awaitingReconnect[$userId] = [
+            'until' => $until,
+            'bridge' => $this->connections[$userId]['bridge'] ?? [],
+        ];
+
+        // An entry already held (put during an earlier drop, its write after that hello
+        // failed) was never written: it keeps what it was held with, its refusal included.
+        foreach ($this->pendingUsage as $requestId => $pending) {
+            if ($pending['user_id'] === $userId && $pending['frame'] !== []) {
+                $this->heldFrames[$userId][self::usageHoldKey((string) $requestId)] ??= ['frame' => $pending['frame'], 'on_sent' => $pending['on_sent']];
+            }
+        }
+
+        foreach ($this->pendingTurnInputs as $pending) {
+            if ($pending['user_id'] === $userId && $pending['frame'] !== []) {
+                $frame = $pending['frame'];
+                $requestId = (string) $frame['request_id'];
+                $messageId = (string) $frame['message_id'];
+                // Out before the drop: whether that bridge read it is unknown, so a bridge
+                // that comes back without turn_input leaves it unanswered (`no_answer`).
+                $this->heldFrames[$userId][self::turnInputHoldKey($requestId, $messageId)] ??= [
+                    'frame' => $frame,
+                    'on_sent' => $pending['on_sent'],
+                    'requires' => 'turn_input',
+                    'on_refused' => fn () => $this->resolvePendingTurnInput($requestId, $messageId, $userId, ['status' => 'rejected', 'reason' => 'no_answer']),
+                ];
+            }
+        }
+
+        // Without a frame to put again (a caller that registered none) the old rule stands.
+        $this->failUnrepeatableForUser($userId);
+        $this->failPendingExchangesForUser($userId);
+    }
+
+    /** Fail the usage questions and mid-turn messages of a user that cannot be sent again. */
+    private function failUnrepeatableForUser(string $userId): void
+    {
+        foreach ($this->pendingUsage as $requestId => $pending) {
+            if ($pending['user_id'] === $userId && $pending['frame'] === []) {
+                unset($this->pendingUsage[$requestId]);
+                ($pending['on_answer'])(['ok' => false, 'reason' => 'not_connected']);
+            }
+        }
+
+        foreach ($this->pendingTurnInputs as $key => $pending) {
+            if ($pending['user_id'] === $userId && $pending['frame'] === []) {
+                unset($this->pendingTurnInputs[$key]);
+                ($pending['on_answer'])(['status' => 'rejected', 'reason' => 'no_answer']);
+            }
+        }
+    }
+
+    /**
+     * A short drop ended without the machine coming back in time: everything that waited for
+     * it fails now, the way it would have failed at the drop.
+     */
+    private function giveUpOnReconnect(string $userId): void
+    {
+        $this->stopAwaitingReconnect($userId);
+
+        Log::info('AI Bridge: bridge did not come back within the grace period', ['user_id' => $userId]);
+
+        $this->failPendingUsageForUser($userId);
+        $this->failPendingTurnInputsForUser($userId, 'connection_lost');
+        $this->failPendingExchangesForUser($userId);
+        $this->notifyUserGone($userId);
     }
 
     /**
