@@ -185,7 +185,7 @@ final class BufferingSink
         });
 
         $handler->onError(function (string $code, string $errorMessage, array $meta = []) use ($append, $handler, $store, $rid): void {
-            $append(MessageTypes::ERROR, ['code' => $code, 'message' => $errorMessage] + self::publicCancelledMeta($meta), true);
+            $append(MessageTypes::ERROR, ['code' => $code, 'message' => $errorMessage] + self::publicErrorMeta($meta), true);
             self::completeQuietly($handler, $store, $rid, 'failed');
         });
 
@@ -255,6 +255,27 @@ final class BufferingSink
         $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
 
         return is_string($encoded) ? strlen($encoded) : 0;
+    }
+
+    /**
+     * What a browser is told beside an error.
+     *
+     * `pending_inputs` as for a cancellation, plus `limit_seconds` when the
+     * bridge stopped the turn on one of its own bounds (silence or wall clock),
+     * so a chat can name the limit that was reached.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    public static function publicErrorMeta(array $meta): array
+    {
+        $public = self::publicCancelledMeta($meta);
+        $limit = $meta['limit_seconds'] ?? null;
+        if (is_int($limit) && $limit > 0) {
+            $public['limit_seconds'] = $limit;
+        }
+
+        return $public;
     }
 
     /**
