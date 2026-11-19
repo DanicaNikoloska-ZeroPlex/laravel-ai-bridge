@@ -3,6 +3,18 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [0.26.1] — 2026-11-19
+
+### Fixed
+
+- **A bridge error keeps `limit_seconds` on its way to the chat (D09710).** The bridge sends
+  `limit_seconds` with `silence_timeout_exceeded` and `request_timeout_exceeded` (PROTOCOL.md), but the
+  server dropped it when passing the error on, so a chat could not name the limit that was reached.
+  `MessageHandler` now hands it to the error listeners as meta, and the buffered stream and the SSE
+  `error` event both carry it (a positive whole number only; anything else is left out). The SSE
+  `error` event now also carries `pending_inputs` when there is one, as the buffered path already did.
+  Additive; protocol stays 0.1. See #58.
+
 ## [0.26.0] — 2026-11-16
 
 ### Added
