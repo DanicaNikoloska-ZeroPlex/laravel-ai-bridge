@@ -488,3 +488,21 @@ test('pending_inputs reaches the browser as non-empty string ids only, on done a
         ->and(BufferingSink::publicDoneMeta(['pending_inputs' => 'm1']))->toBe([])
         ->and(BufferingSink::publicCancelledMeta(['pending_inputs' => ['m3', null]]))->toBe(['pending_inputs' => ['m3']]);
 });
+
+test('an error the bridge stopped on its own bound keeps limit_seconds for the chat (D09710)', function () {
+    $store = new ArrayStreamStore();
+    $handler = new StreamHandler(fakeBufferProvider(), 'rid-limit');
+    BufferingSink::attach($handler, $store);
+
+    $handler->dispatchError('request_timeout_exceeded', 'ran past the limit', ['limit_seconds' => 86400]);
+
+    $error = collect($store->range('rid-limit'))->firstWhere('event', 'error');
+    expect($error['data'])->toBe(['code' => 'request_timeout_exceeded', 'message' => 'ran past the limit', 'limit_seconds' => 86400]);
+});
+
+test('limit_seconds reaches the browser only as a positive whole number (D09710)', function () {
+    expect(BufferingSink::publicErrorMeta(['limit_seconds' => 900]))->toBe(['limit_seconds' => 900])
+        ->and(BufferingSink::publicErrorMeta(['limit_seconds' => 0]))->toBe([])
+        ->and(BufferingSink::publicErrorMeta(['limit_seconds' => '900']))->toBe([])
+        ->and(BufferingSink::publicErrorMeta(['limit_seconds' => 900, 'secret' => 'x']))->toBe(['limit_seconds' => 900]);
+});

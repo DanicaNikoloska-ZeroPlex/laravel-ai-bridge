@@ -2271,7 +2271,14 @@ class MessageHandler
             'message' => $errorMessage,
         ]);
 
-        $handler->dispatchError($code, $errorMessage);
+        // A turn the bridge stopped on its own bound says which bound: keep the figure, so a
+        // consumer can tell the person "stopped after 15 minutes" instead of guessing it.
+        $limit = $data['limit_seconds'] ?? null;
+        $handler->dispatchError(
+            $code,
+            $errorMessage,
+            is_int($limit) && $limit > 0 ? ['limit_seconds' => $limit] : [],
+        );
         $this->connectionManager->removePendingRequest($requestId);
         $this->forgetRecovery($requestId);
 

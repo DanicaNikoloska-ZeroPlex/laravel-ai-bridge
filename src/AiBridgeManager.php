@@ -827,9 +827,9 @@ class AiBridgeManager
             }
         });
 
-        $stream->onError(function (string $code, string $errorMessage) use ($sink, $onTerminal) {
+        $stream->onError(function (string $code, string $errorMessage, array $meta = []) use ($sink, $onTerminal) {
             try {
-                $sink(['event' => MessageTypes::ERROR, 'data' => ['code' => $code, 'message' => $errorMessage]]);
+                $sink(['event' => MessageTypes::ERROR, 'data' => ['code' => $code, 'message' => $errorMessage] + BufferingSink::publicErrorMeta($meta)]);
             } finally {
                 if ($onTerminal) {
                     $onTerminal();

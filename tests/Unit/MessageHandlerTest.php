@@ -366,6 +366,50 @@ test('stream error from wrong user is discarded (BL-007)', function () {
     expect($this->manager->getPendingRequest('req-1'))->not->toBeNull();
 });
 
+test('a bridge error with limit_seconds hands the limit on to the listeners (D09710)', function () {
+    $handler = makeHandler($this->manager);
+
+    $seen = null;
+    $handler->onError(function (string $code, string $message, array $meta = []) use (&$seen) {
+        $seen = [$code, $meta];
+    });
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', $handler, 'user-1');
+
+    $send = fn (array $data) => $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::STREAM,
+        'request_id' => 'req-1',
+        'event' => MessageTypes::ERROR,
+        'data' => $data,
+    ]));
+
+    $send(['code' => 'silence_timeout_exceeded', 'message' => 'quiet', 'limit_seconds' => 900]);
+
+    expect($seen)->toBe(['silence_timeout_exceeded', ['limit_seconds' => 900]]);
+});
+
+test('a bridge error without a usable limit hands on no meta (D09710)', function () {
+    $handler = makeHandler($this->manager);
+
+    $seen = null;
+    $handler->onError(function (string $code, string $message, array $meta = []) use (&$seen) {
+        $seen = $meta;
+    });
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', $handler, 'user-1');
+
+    $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::STREAM,
+        'request_id' => 'req-1',
+        'event' => MessageTypes::ERROR,
+        'data' => ['code' => 'boom', 'message' => 'x', 'limit_seconds' => 'lots'],
+    ]));
+
+    expect($seen)->toBe([]);
+});
+
 // --- CONS-006: StreamEvent::toolCall() uses 'tool_call_id' key ---
 
 test("StreamEvent::toolCall() stores 'tool_call_id' not 'call_id' (CONS-006)", function () {
