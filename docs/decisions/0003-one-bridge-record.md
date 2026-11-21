@@ -29,10 +29,11 @@ upstream: false whenever the bridge is not connected.
 
 ## Options considered
 
-- Keep PR #38's live-only `bridge_version`: rejected, because a host shows a machine is behind
+- Keep PR #38's live-only `bridge_version`: rejected, because the fork's host application shows a machine is behind
   while it is switched off.
 
 ## Note
 
-On 2026-11-21 the names of the fork, its owner and its host application were taken out of this
-record at the repository owner's request. The decision and its reasoning are unchanged.
+On 2026-11-21 the names of the fork, its owner, its people and its host application, and its
+internal ticket numbers, were taken out of this record at the repository owner's request. The
+decision and its reasoning are unchanged.

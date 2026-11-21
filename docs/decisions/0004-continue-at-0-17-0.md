@@ -26,5 +26,6 @@ own versions, marked as published from the fork.
 
 ## Note
 
-On 2026-11-21 the names of the fork, its owner and its host application were taken out of this
-record at the repository owner's request. The decision and its reasoning are unchanged.
+On 2026-11-21 the names of the fork, its owner, its people and its host application, and its
+internal ticket numbers, were taken out of this record at the repository owner's request. The
+decision and its reasoning are unchanged.
