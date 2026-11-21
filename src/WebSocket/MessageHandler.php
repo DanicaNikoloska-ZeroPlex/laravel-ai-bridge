@@ -89,7 +89,7 @@ class MessageHandler
     /**
      * The largest view a tool call may keep in the stream store, as its JSON (256 KB).
      *
-     * A host chat is not expected to draw a larger `ui`, so
+     * A host chat may refuse to draw a larger `ui`, so
      * storing one only costs the shared store memory for a card nobody will see.
      */
     private const MAX_TOOL_VIEW_BYTES = StreamHandler::MAX_TOOL_VIEW_BYTES;

@@ -1109,7 +1109,7 @@ In this package the one-time URL is the public WebSocket URL plus `?transfer=<id
 ### Upload
 
 ```json
-{ "type": "upload_offer", "id": "u1", "url": "https://app.example/api/ai-bridge/ws?transfer=u1",
+{ "type": "upload_offer", "id": "u1", "url": "https://app.example.com/api/ai-bridge/ws?transfer=u1",
   "working_dir": "/home/dev/repo", "name": "report.pdf", "mime_type": "application/pdf", "size": 48213 }
 ```
 

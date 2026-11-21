@@ -227,7 +227,7 @@ it('drops a ui too large for the turn from the record whole, never cutting it', 
 });
 
 it('logs why a view tool called without provider_tool_call_id gets no view', function () {
-    // otherwise indistinguishable, server-side, from a tool that has no view.
+    // Without it the call is indistinguishable, server-side, from a tool that has no view.
     $rig = viewRig();
     Log::spy();
 
@@ -249,7 +249,7 @@ it('logs that a view tool returning a plain value gives its view text only', fun
 });
 
 it('keeps no view larger than a host will draw, and still answers the CLI', function () {
-    // an oversized view is refused before it reaches the shared stream store.
+    // An oversized view is refused before it reaches the shared stream store.
     $rig = viewRig();
     Log::spy();
 
@@ -263,7 +263,7 @@ it('keeps no view larger than a host will draw, and still answers the CLI', func
 });
 
 it('says a ui was dropped because earlier blocks spent the turn, not because it was too large', function () {
-    // a small card after large tool output must not read as "this card was too big".
+    // A small card after large tool output must not read as "this card was too big".
     $rig = viewRig();
 
     // Nine local results of 1 MB each spend the turn's 8 MB before the card is considered.

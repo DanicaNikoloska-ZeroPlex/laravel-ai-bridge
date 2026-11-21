@@ -123,7 +123,7 @@ class StreamHandler
      * The largest view a tool call may carry, as its JSON (256 KB), whether the server built
      * it or a bridge sent it for an upstream tool.
      *
-     * A host chat is not expected to draw a larger `ui`, so
+     * A host chat may refuse to draw a larger `ui`, so
      * keeping one only costs memory for a card nobody will see.
      */
     public const MAX_TOOL_VIEW_BYTES = 262144;

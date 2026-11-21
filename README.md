@@ -308,7 +308,7 @@ rather than asking anyone to type an absolute path:
 
 ```php
 $status = app(ConnectionStatus::class)->for($connection);
-$status['workspaces'];  // [['path' => '/home/me/projects', 'label' => 'Projects'], ...]
+$status['workspaces'];  // [['path' => '/home/me/projects/acme-app', 'label' => 'Acme'], ...]
 ```
 
 The list is empty for a bridge whose operator passed no `--allow-dir`, and for
