@@ -1417,7 +1417,7 @@ bridge sends:
   "tool_name": "show_grant_request",
   "arguments": { "grant_id": 42 },
   "result": {
-    "content": [{ "type": "text", "text": "Grant request 42 is waiting for Dragan." }],
+    "content": [{ "type": "text", "text": "Grant request 42 is waiting for Sam." }],
     "structuredContent": { "grant_id": 42, "deliverables": [9227], "gates": ["walkthrough"] }
   }
 }
