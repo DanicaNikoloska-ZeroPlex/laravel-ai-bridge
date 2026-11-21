@@ -9,7 +9,7 @@ revisit_when: an action in a card has to run where only the bridge can reach (on
 
 ## Context
 
-MCP App cards, built in a downstream fork (its PR #3), let a tool name a `ui://` view that the chat draws
+MCP App cards, built in a downstream fork, let a tool name a `ui://` view that the chat draws
 as a card, for example with a Confirm button. Some buttons must be the person's own act
 (confirming a grant), which the assistant must not be able to perform. The design was reworked
 twice after plan review on 2026-10-14 (commits 9ccaca1, cca107c).

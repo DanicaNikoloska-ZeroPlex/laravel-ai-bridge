@@ -13,7 +13,7 @@ Merging a downstream fork back (PR #39) met upstream's PR #38 head-on: both reco
 from `hello`. PR #38 had kept `bridge_version` and `self_update` live only (flat keys, no
 migration), reasoning that a remembered version is what a self-update makes out of date. The fork
 kept `bridge_version` inside the `bridge` record cached in `ai_bridge_connections.last_bridge`,
-and the fork's host application relied on seeing it while a machine is off.
+and the fork's host application relies on seeing it while a machine is off.
 
 ## Decision
 

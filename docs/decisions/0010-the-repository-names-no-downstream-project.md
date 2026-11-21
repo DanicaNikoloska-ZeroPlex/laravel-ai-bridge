@@ -24,7 +24,7 @@ Earlier commits carry those people's and that organisation's e-mail addresses as
   kept as SHA-256 hashes, so the check does not itself spell out what it keeps out.
 - Git history is not rewritten: no force-push, and tags, released versions and earlier pull
   requests stay as they are. `.mailmap` maps the earlier identities for `git log`,
-  `git shortlog` and `git blame`: the owner's to `jfbauer <jasper@tetrix.dev>`, everyone
+  `git shortlog` and `git blame`: every one of the owner's to `jfbauer <jasper@tetrix.dev>`, everyone
   else's to a neutral `Contributor`.
 - As a one-time exception to never editing an accepted record, 0003-0006 were reworded to say
   "a downstream fork" and "the host application", each with a dated note that its wording was
