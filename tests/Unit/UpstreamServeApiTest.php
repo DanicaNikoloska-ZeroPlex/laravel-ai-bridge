@@ -329,7 +329,7 @@ describe('POST /api/request message', function () {
     })->with(['missing' => null, 'empty' => '']);
 });
 
-// --- D09710 rework: a held exchange never outlives its caller (#14334, #14336) ---
+// --- Short drops: a held exchange never outlives its caller ---
 
 /** serveRig() whose key-1 bridge announced reliable_delivery and is away on a short drop. */
 function droppedServeRig(float $timeout): object
@@ -366,7 +366,7 @@ describe('an exchange held through a short drop', function () {
             ->and($out->responses[0]['body']['code'])->toBe('discovery_failed');
     });
 
-    it('is dropped and answered not_connected when its caller\'s timeout passes first, and never sent (#14334)', function () {
+    it('is dropped and answered not_connected when its caller\'s timeout passes first, and never sent', function () {
         $rig = droppedServeRig(0.05);
         $out = servePost($rig, '/api/mcp', ['server' => 'weather', 'method' => 'tools/call', 'params' => ['name' => 'refresh']]);
 
@@ -379,7 +379,7 @@ describe('an exchange held through a short drop', function () {
         expect($rig->sent)->toBe([]);
     });
 
-    it('gives a second identical request its own clock, and keeps the frame for it when the first gives up (#14336)', function () {
+    it('gives a second identical request its own clock, and keeps the frame for it when the first gives up', function () {
         $rig = droppedServeRig(0.2);
         $a = servePost($rig, '/api/upstream/auth-start', ['server' => 'kaizen']);
         $b = null;
@@ -402,7 +402,7 @@ describe('an exchange held through a short drop', function () {
     });
 });
 
-// --- D09710 review follow-up: held work is re-checked against the bridge that comes back ---
+// --- Short drops: held work is re-checked against the bridge that comes back ---
 
 it('does not send a held exchange to a reconnecting bridge without mcp_upstream_auth, and answers 409 at once (review point 5)', function () {
     $rig = droppedServeRig(5.0);

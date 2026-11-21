@@ -86,9 +86,9 @@ it('round-trips a JSON column through the real driver', function () {
         'type' => 'bridge',
         'name' => 'laptop',
         'connection_key' => 'key-1',
-        'last_workspaces' => [['path' => '/repos/studio', 'label' => 'Studio']],
+        'last_workspaces' => [['path' => '/repos/acme-app', 'label' => 'Acme']],
     ]);
 
     expect($connection->fresh()->last_workspaces)
-        ->toBe([['path' => '/repos/studio', 'label' => 'Studio']]);
+        ->toBe([['path' => '/repos/acme-app', 'label' => 'Acme']]);
 });

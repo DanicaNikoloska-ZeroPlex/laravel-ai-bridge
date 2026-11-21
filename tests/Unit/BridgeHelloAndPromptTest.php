@@ -356,7 +356,7 @@ it('reads a status from a serve process that reports only the flat bridge_versio
         ->and($connection->fresh()->last_bridge['bridge_version'])->toBe('0.24.0');
 });
 
-// --- D09710: reliable delivery through a short drop -----------------------------
+// --- Reliable delivery through a short drop -----------------------------
 
 const HELLO_RELIABLE = [
     'type' => 'hello',
@@ -449,7 +449,7 @@ it('fails every detached turn when an older bridge replaces a reliable one', fun
         ->and($rig->manager->getPendingRequest('req-1'))->toBeNull();
 });
 
-it('accepts reliable_delivery in the flat hello form too (#14262, #14269)', function () {
+it('accepts reliable_delivery in the flat hello form too', function () {
     $rig = helloRig();
     $rig->manager->addConnection('user-1', 'conn-1');
 
@@ -458,7 +458,7 @@ it('accepts reliable_delivery in the flat hello form too (#14262, #14269)', func
     expect($rig->manager->bridgeSupports('user-1', 'reliable_delivery'))->toBeTrue();
 });
 
-it('ignores a running_turns id over 256 characters, so that turn is not re-attached (#14262)', function () {
+it('ignores a running_turns id over 256 characters, so that turn is not re-attached', function () {
     $rig = helloRig();
     $rig->manager->addConnection('user-1', 'conn-1');
     $rig->handler->handleMessage('conn-1', null, json_encode(HELLO_RELIABLE));

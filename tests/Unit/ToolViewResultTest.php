@@ -31,7 +31,7 @@ use Tetrix\AiBridge\WebSocket\MessageHandler;
 
 uses(RefreshDatabase::class);
 
-const VIEW_URI = 'ui://studio/grant-request';
+const VIEW_URI = 'ui://app/grant-request';
 
 function viewRig(): object
 {
@@ -48,9 +48,9 @@ function viewRig(): object
         ),
         view: VIEW_URI,
     );
-    $registry->register('show_plain_card', 'A view tool returning a plain array', [], fn () => ['ok' => true], view: 'ui://studio/plain');
+    $registry->register('show_plain_card', 'A view tool returning a plain array', [], fn () => ['ok' => true], view: 'ui://app/plain');
     $registry->register('no_view', 'A tool without a view', [], fn () => ToolResult::withView('just text', ['ignored' => true]));
-    $registry->register('show_huge_card', 'A view tool returning more than a view may keep', [], fn () => ToolResult::withView('big', ['blob' => str_repeat('x', 300 * 1024)]), view: 'ui://studio/huge');
+    $registry->register('show_huge_card', 'A view tool returning more than a view may keep', [], fn () => ToolResult::withView('big', ['blob' => str_repeat('x', 300 * 1024)]), view: 'ui://app/huge');
 
     $rig = new stdClass();
     $rig->manager = new BridgeConnectionManager();
@@ -227,7 +227,7 @@ it('drops a ui too large for the turn from the record whole, never cutting it', 
 });
 
 it('logs why a view tool called without provider_tool_call_id gets no view', function () {
-    // #11497: otherwise indistinguishable, server-side, from a tool that has no view.
+    // otherwise indistinguishable, server-side, from a tool that has no view.
     $rig = viewRig();
     Log::spy();
 
@@ -238,7 +238,6 @@ it('logs why a view tool called without provider_tool_call_id gets no view', fun
 });
 
 it('logs that a view tool returning a plain value gives its view text only', function () {
-    // #11489
     $rig = viewRig();
     Log::spy();
 
@@ -250,7 +249,7 @@ it('logs that a view tool returning a plain value gives its view text only', fun
 });
 
 it('keeps no view larger than a host will draw, and still answers the CLI', function () {
-    // #11494: an oversized view is refused before it reaches the shared stream store.
+    // an oversized view is refused before it reaches the shared stream store.
     $rig = viewRig();
     Log::spy();
 
@@ -264,7 +263,7 @@ it('keeps no view larger than a host will draw, and still answers the CLI', func
 });
 
 it('says a ui was dropped because earlier blocks spent the turn, not because it was too large', function () {
-    // #11496: a small card after large tool output must not read as "this card was too big".
+    // a small card after large tool output must not read as "this card was too big".
     $rig = viewRig();
 
     // Nine local results of 1 MB each spend the turn's 8 MB before the card is considered.

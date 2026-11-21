@@ -366,7 +366,7 @@ test('stream error from wrong user is discarded (BL-007)', function () {
     expect($this->manager->getPendingRequest('req-1'))->not->toBeNull();
 });
 
-test('a bridge error with limit_seconds hands the limit on to the listeners (D09710)', function () {
+test('a bridge error with limit_seconds hands the limit on to the listeners', function () {
     $handler = makeHandler($this->manager);
 
     $seen = null;
@@ -389,7 +389,7 @@ test('a bridge error with limit_seconds hands the limit on to the listeners (D09
     expect($seen)->toBe(['silence_timeout_exceeded', ['limit_seconds' => 900]]);
 });
 
-test('a bridge error without a usable limit hands on no meta (D09710)', function () {
+test('a bridge error without a usable limit hands on no meta', function () {
     $handler = makeHandler($this->manager);
 
     $seen = null;
@@ -1583,7 +1583,7 @@ test('a cancelled turn without pending inputs, or with a malformed list, passes 
     expect($meta)->toBe([]);
 })->with(['absent', [[]], 'a string', [['a' => 'msg-1']]]);
 
-// --- D09710: reliable delivery (numbered frames and stream_ack) ---
+// --- Reliable delivery (numbered frames and stream_ack) ---
 
 /** A pending turn of user-1 on conn-1 that records the deltas it is given and the frames sent to the bridge. */
 function reliableRig(object $test): object
@@ -1772,9 +1772,9 @@ test('a numbered tool_call is run once and a re-send of it is not run again', fu
         ->and(($rig->acks)())->toBe([1, 1]);
 });
 
-// --- D09710 rework: receipts for turns the server ended or does not hold ---
+// --- Short drops: receipts for turns the server ended or does not hold ---
 
-test('a frame whose processing throws is not counted as stored, so its re-send is stored (#14257)', function () {
+test('a frame whose processing throws is not counted as stored, so its re-send is stored', function () {
     config(['ai-bridge.websocket.stream_ack_interval' => 0]);
     $rig = reliableRig($this);
     $provider = Mockery::mock(StreamableProvider::class);
@@ -1809,7 +1809,7 @@ test('a frame whose processing throws is not counted as stored, so its re-send i
         ->and(($rig->acks)())->toBe([1]);
 });
 
-test('a numbered frame of a turn the server never held is answered closed with its own seq, and still settled (#14260)', function () {
+test('a numbered frame of a turn the server never held is answered closed with its own seq, and still settled', function () {
     $rig = reliableRig($this);
 
     $this->messageHandler->handleMessage('conn-1', null, numberedDelta(4, 'x', 'req-gone'));
@@ -1821,7 +1821,7 @@ test('a numbered frame of a turn the server never held is answered closed with i
     ]);
 });
 
-test('a stop seen on the heartbeat tells a reliable bridge the turn is closed, with the last stored seq (#14273)', function () {
+test('a stop seen on the heartbeat tells a reliable bridge the turn is closed, with the last stored seq', function () {
     config(['ai-bridge.websocket.stream_ack_interval' => 0]);
     $store = new ArrayStreamStore();
     app()->instance(StreamStoreContract::class, $store);
@@ -1844,7 +1844,7 @@ test('a stop seen on the heartbeat tells a reliable bridge the turn is closed, w
     expect($rig->sent)->toBe([['type' => 'stream_ack', 'request_id' => 'req-1', 'seq' => 3, 'closed' => true]]);
 });
 
-test('a stop seen on a numbered frame is confirmed once, closed, with that frame\'s seq (#14273)', function () {
+test('a stop seen on a numbered frame is confirmed once, closed, with that frame\'s seq', function () {
     config(['ai-bridge.websocket.stream_ack_interval' => 0]);
     $store = new ArrayStreamStore();
     app()->instance(StreamStoreContract::class, $store);
@@ -1918,7 +1918,7 @@ test('an unnumbered cancelled without pending_inputs for a turn the server close
     Log::shouldNotHaveReceived('error');
 });
 
-// --- D09710 review follow-up: a frame is confirmed only once it is in the stream store ---
+// --- Short drops: a frame is confirmed only once it is in the stream store ---
 
 /** The real store, failing the appends (or completions) it is told to; a BufferingSink writes into it. */
 final class FlakyStreamStore implements StreamStoreContract
@@ -2098,7 +2098,7 @@ test('a turn whose output cannot be stored ends with a visible error after the s
         ->and(end($rig->sent))->toBe(['type' => 'stream_ack', 'request_id' => 'req-1', 'seq' => 1, 'closed' => true]);
 });
 
-// --- D09710 review follow-up: a gap on a live connection does not hang the turn ---
+// --- Short drops: a gap on a live connection does not hang the turn ---
 
 /** A pending turn req-2 of user-1 whose handler throws on the frames it is told to. */
 function throwingTurn(object $test): object
@@ -2199,7 +2199,7 @@ test('a detached turn is not ended for a stall: the grace period bounds it (revi
         ->and($this->manager->isDetached('req-2'))->toBeTrue();
 });
 
-// --- D09710 CodeRabbit: a deferred terminal write is owned on every cleanup path ---
+// --- Short drops: a deferred terminal write is owned on every cleanup path ---
 
 test('a turn that ends while its store writes are kept is finished in the store once it is back, on every ending path (CodeRabbit 4537573143)', function (string $frame, string $status) {
     $rig = bufferedRig($this);
@@ -2273,7 +2273,7 @@ test('when the store keeps refusing an ended turn\'s output, the rest is given u
         ->and($this->manager->unstoredHandlers())->toBe([]);
 });
 
-// --- D09710 CodeRabbit: the kept store writes of a turn are bounded ---
+// --- Short drops: the kept store writes of a turn are bounded ---
 
 test('a turn whose kept store writes reach their bound stops keeping more and is ended at once, not after the stall bound (CodeRabbit 4537573154)', function () {
     config([
@@ -2306,7 +2306,7 @@ test('a turn whose kept store writes reach their bound stops keeping more and is
     expect($rig->store->status($rig->rid)['status'])->toBe('failed');
 });
 
-test('a turn on a bridge without reliable_delivery drops a failed store write as before: it is not ended, sent no stream_ack, and later writes land once the store is back (D09710 review)', function () {
+test('a turn on a bridge without reliable_delivery drops a failed store write as before: it is not ended, sent no stream_ack, and later writes land once the store is back', function () {
     config([
         'ai-bridge.websocket.stream_ack_interval' => 0,
         'ai-bridge.websocket.stream_stall_seconds' => 60,

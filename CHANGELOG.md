@@ -7,7 +7,7 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
 ### Fixed
 
-- **A bridge error keeps `limit_seconds` on its way to the chat (D09710).** The bridge sends
+- **A bridge error keeps `limit_seconds` on its way to the chat.** The bridge sends
   `limit_seconds` with `silence_timeout_exceeded` and `request_timeout_exceeded` (PROTOCOL.md), but the
   server dropped it when passing the error on, so a chat could not name the limit that was reached.
   `MessageHandler` now hands it to the error listeners as meta, and the buffered stream and the SSE
@@ -19,7 +19,7 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
 ### Added
 
-- **A reply survives a short drop (D09710, PROTOCOL.md "Short drops").** A bridge that sends
+- **A reply survives a short drop (PROTOCOL.md "Short drops").** A bridge that sends
   `capabilities.reliable_delivery: true` in `hello` numbers its `stream` frames (`seq`, 1.. per
   `request_id`, final frame included). The server stores a frame only when its `seq` is one more
   than the last stored for that turn, drops re-sends (and confirms them again), and does not store
@@ -64,7 +64,7 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   `reachableBridgeInfo()`, `reachableBridgeSupports()`, `sendOrHold()`, `flushHeldFrames()`,
   `isHeldFrame()`, `dropHeldFrame()`, `lostAfterDropMessage()`, `MessageTypes::STREAM_ACK`.
 
-### Fixed (D09710 review follow-up)
+### Fixed (review follow-up)
 
 - **A frame is confirmed only once it is in the stream store.** A `BufferingSink` write that fails is
   no longer logged and lost: it is kept on the turn's handler (`StreamHandler::deferStore()`) and
@@ -325,8 +325,8 @@ Upstream MCP Apps and OAuth sign-in for the MCP servers a bridge connects to
 
 ## [0.18.0] — 2026-10-16
 
-The MCP App cards built in the ZeroPlexBV fork (D09346, released there as
-`zeroplex/laravel-ai-bridge` 0.18.0) merged back, without the package rename: the package stays
+The MCP App cards built in a downstream fork (released there under another package name as
+0.18.0) merged back, without the package rename: the package stays
 **`tetrixdev/laravel-ai-bridge`**. An application on the fork can switch back by requiring
 `tetrixdev/laravel-ai-bridge` again; the namespace (`Tetrix\AiBridge`) never changed.
 
@@ -357,7 +357,7 @@ The MCP App cards built in the ZeroPlexBV fork (D09346, released there as
 
 ## [Unreleased] — to be released as 0.17.0
 
-The ZeroPlexBV fork (0.16.0-RC1, 0.16.0, 0.16.1 below) merged back into
+A downstream fork (0.16.0-RC1, 0.16.0, 0.16.1 below) merged back into
 tetrixdev/laravel-ai-bridge, together with upstream's own 0.16.0 (the desired bridge
 version: `ai-bridge.bridge.desired_version`, `welcome.desired_bridge_version`, hello
 `self_update`). The two 0.16.x lines are different releases that share version numbers, so
@@ -402,16 +402,16 @@ No migration, no config change.
 
 ## [0.16.0] — 2026-09-30
 
-The final release of 0.16.0, identical in code to 0.16.0-RC1. It pairs with **zeroplex/ai 9.4.0**
-and **ai-bridge 0.17.0 or newer** (0.21.0 recommended). Published from the ZeroPlexBV fork while the
+The final release of 0.16.0, identical in code to 0.16.0-RC1. It pairs with
+**ai-bridge 0.17.0 or newer** (0.21.0 recommended). Published from a downstream fork while the
 changes wait to go upstream. Everything listed under 0.16.0-RC1 below applies; run the migration
 (one new column) when upgrading from 0.15.0.
 
 ## [0.16.0-RC1] — 2026-09-29
 
-A release candidate, published from the ZeroPlexBV fork while it waits to go upstream.
-It catches the package up with **ai-bridge 0.21.0** and carries everything the chat overhaul
-in zeroplex/ai 9.4 needs. Everything is additive: an application that asks for none of it
+A release candidate, published from a downstream fork while it waits to go upstream.
+It catches the package up with **ai-bridge 0.21.0** and carries everything a chat overhaul
+in a host application needs. Everything is additive: an application that asks for none of it
 behaves as on 0.15.0. Run the migration (one new column).
 
 ### Added

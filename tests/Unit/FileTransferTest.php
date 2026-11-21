@@ -126,7 +126,7 @@ final class FakeSocket extends EventEmitter implements ConnectionInterface
 function transferRig(array $hello = ['file_uploads' => true, 'file_downloads' => true]): object
 {
     Event::fake();
-    config()->set('ai-bridge.server.public_url', 'wss://studio.test/api/ai-bridge/ws');
+    config()->set('ai-bridge.server.public_url', 'wss://app.test/api/ai-bridge/ws');
 
     $rig = new stdClass();
     $rig->manager = new BridgeConnectionManager();
@@ -204,7 +204,7 @@ it('offers an upload to the machine with a one-time URL on the connected origin,
         'mime_type' => 'application/pdf',
         'size' => 10,
     ])
-        ->and($offer['url'])->toBe('https://studio.test/api/ai-bridge/ws?transfer='.$offer['id'])
+        ->and($offer['url'])->toBe('https://app.test/api/ai-bridge/ws?transfer='.$offer['id'])
         ->and($worker->paused)->toBeTrue()
         ->and($worker->written)->toBe('');
 });
@@ -378,7 +378,7 @@ it('asks the machine for a file by its id with the browser\'s Range, and answers
     $ask = frame($rig, MessageTypes::FILE_READ);
 
     expect($ask)->toMatchArray(['file_id' => 'f-1', 'range' => 'bytes=0-4'])
-        ->and($ask['url'])->toBe('https://studio.test/api/ai-bridge/ws?transfer='.$ask['id']);
+        ->and($ask['url'])->toBe('https://app.test/api/ai-bridge/ws?transfer='.$ask['id']);
 
     machineSays($rig, ['type' => 'file_read_result', 'id' => $ask['id'], 'ok' => true, 'size' => 100, 'status' => 206, 'start' => 0, 'end' => 4]);
 
@@ -501,9 +501,9 @@ it('refuses a malformed chunk size', function () {
 })->throws(UnexpectedValueException::class);
 
 it('builds the one-time URL from the configured transfer URL when there is one', function () {
-    config()->set('ai-bridge.transfers.url', 'https://studio.test/ai-bridge/transfer');
+    config()->set('ai-bridge.transfers.url', 'https://app.test/ai-bridge/transfer');
 
-    expect(TransferHub::transferUrl('abc'))->toBe('https://studio.test/ai-bridge/transfer?transfer=abc');
+    expect(TransferHub::transferUrl('abc'))->toBe('https://app.test/ai-bridge/transfer?transfer=abc');
 
     config()->set('ai-bridge.transfers.url', null);
     config()->set('ai-bridge.server.public_url', null);
@@ -547,7 +547,7 @@ it('asks the bridge to keep handed-back files on the machine only when configure
     expect($welcome()['config']['attachments'])->toBe('device');
 });
 
-// --- D09710 rework: a file hand-over waits out a short drop (#14256) ---------------
+// --- Short drops: a file hand-over waits out a short drop ---------------
 
 /** transferRig() whose user-1 bridge announced reliable_delivery. */
 function reliableTransferRig(): object
@@ -622,7 +622,7 @@ it('ends the transfers of a machine that does not come back within the grace per
     expect($worker->json()['code'])->toBe('machine_gone')->and($rig->hub->inFlight())->toBe(0);
 });
 
-it('starts the upload confirm clock when upload_sent is written after the reconnect, not while it is held (#14335)', function () {
+it('starts the upload confirm clock when upload_sent is written after the reconnect, not while it is held', function () {
     $rig = reliableTransferRig();
     $worker = startUpload($rig, 3);
     $id = frame($rig, MessageTypes::UPLOAD_OFFER)['id'];
@@ -641,7 +641,7 @@ it('starts the upload confirm clock when upload_sent is written after the reconn
         ->and($uploads->getValue($rig->hub)[$id]['timer'])->not->toBeNull();
 });
 
-// --- D09710 review follow-up: held transfer frames follow their transfer ---------------
+// --- Short drops: held transfer frames follow their transfer ---------------
 
 it('drops a held upload_offer when its upload fails during the drop: the machine is never offered it (review point 4)', function () {
     $rig = reliableTransferRig();

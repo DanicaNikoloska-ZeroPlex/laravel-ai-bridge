@@ -38,7 +38,7 @@ function upstreamViewRig(): object
     Event::fake();
 
     $registry = new ToolRegistry();
-    $registry->register('show_grant_request', 'A server tool with a view', [], fn () => ToolResult::withView('Shown.', ['grant_id' => 1]), view: 'ui://studio/grant');
+    $registry->register('show_grant_request', 'A server tool with a view', [], fn () => ToolResult::withView('Shown.', ['grant_id' => 1]), view: 'ui://app/grant');
 
     $rig = new stdClass();
     $rig->connection = Connection::create(['type' => Connection::TYPE_BRIDGE, 'connection_key' => 'key-1', 'name' => 'laptop']);
@@ -157,7 +157,7 @@ it('ignores a bridge-sent ui on a server tool\'s call, keeping the server-built 
     ($rig->stream)(MessageTypes::TOOL_RESULT, ['tool_call_id' => 'toolu_s1', 'result' => 'Shown.', 'ui' => upstreamUi()]);
 
     $ui = upstreamResults($rig)[0]['ui'];
-    expect($ui['resource_uri'])->toBe('ui://studio/grant')
+    expect($ui['resource_uri'])->toBe('ui://app/grant')
         ->and($ui)->not->toHaveKey('server');
 });
 
@@ -191,7 +191,7 @@ it('still attaches a server-built view, without server or connection_id, when th
     ($rig->stream)(MessageTypes::DONE, ['usage' => null]);
 
     $ui = upstreamResults($rig)[0]['ui'];
-    expect($ui['resource_uri'])->toBe('ui://studio/grant')
+    expect($ui['resource_uri'])->toBe('ui://app/grant')
         ->and($ui['result']['structuredContent'])->toBe(['grant_id' => 1])
         ->and($ui)->not->toHaveKey('server')
         ->and($ui)->not->toHaveKey('connection_id')

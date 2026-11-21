@@ -32,7 +32,7 @@ graph LR
     Bridge --> Upstreams["Upstream MCP servers (--mcp-upstreams)"]
     Person -->|OAuth sign-in| AuthServer["Upstream authorization server"]
     AuthServer -->|redirect with code| App
-    Host["Host chat (e.g. zeroplex/ai)"] -->|PHP API, events| App
+    Host["Host chat application"] -->|PHP API, events| App
 ```
 
 The bridge connects out to the application, so the user's machine needs no open port.

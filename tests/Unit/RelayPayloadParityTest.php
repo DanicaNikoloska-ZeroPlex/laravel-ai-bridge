@@ -78,7 +78,7 @@ test('a fully-populated turn survives the relay unchanged', function () {
         'max_tokens' => 1000,
         'cli_session_id' => null,
         'messages' => [['role' => 'user', 'content' => 'earlier']],
-        'working_dir' => '/repos/studio',
+        'working_dir' => '/repos/acme-app',
         'attachments' => [[
             'id' => 'att_1', 'name' => 'a.pdf', 'mime_type' => 'application/pdf',
             'size' => 10, 'sha256' => 'abc', 'url' => 'https://x.test/a',
@@ -93,10 +93,10 @@ test('working_dir reaches the relay body', function () {
     // workspace feature simply not working under PHP-FPM.
     ['relayed' => $relayBody] = relayedBodyFor([
         'cli_session_id' => null,
-        'working_dir' => '/repos/studio',
+        'working_dir' => '/repos/acme-app',
     ]);
 
-    expect($relayBody['working_dir'])->toBe('/repos/studio');
+    expect($relayBody['working_dir'])->toBe('/repos/acme-app');
 });
 
 test('attachments reach the relay body', function () {
@@ -115,7 +115,7 @@ test('a resumed turn survives the relay unchanged', function () {
     ['direct' => $direct, 'relayed' => $relayBody] = relayedBodyFor([
         'cli_session_id' => 'sess-1',
         'messages' => [['role' => 'user', 'content' => 'earlier']],
-        'working_dir' => '/repos/studio',
+        'working_dir' => '/repos/acme-app',
     ]);
 
     expect(replayRelayBody($relayBody))->toBe($direct)

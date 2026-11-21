@@ -53,11 +53,11 @@ describe('the hello handshake', function () {
             'version' => '0.1',
             'token' => $token,
             'providers' => [['name' => 'claude', 'available' => true]],
-            'workspaces' => [['path' => '/repos/studio', 'label' => 'Studio']],
+            'workspaces' => [['path' => '/repos/acme-app', 'label' => 'Acme']],
         ]));
 
         expect($manager->getWorkspaces('user-1'))
-            ->toBe([['path' => '/repos/studio', 'label' => 'Studio']]);
+            ->toBe([['path' => '/repos/acme-app', 'label' => 'Acme']]);
     });
 
     it('records an empty list when the bridge advertises none', function () {
@@ -147,12 +147,12 @@ describe('choosing a workspace for a conversation', function () {
             Request::create('/ai-bridge/conversations', 'POST', [
                 'mode' => 'bridge',
                 'connection_id' => $connection->id,
-                'working_dir' => '/repos/studio',
+                'working_dir' => '/repos/acme-app',
             ])
         );
 
         expect($response->getStatusCode())->toBe(201)
-            ->and(json_decode($response->getContent(), true)['working_dir'])->toBe('/repos/studio');
+            ->and(json_decode($response->getContent(), true)['working_dir'])->toBe('/repos/acme-app');
     });
 
     it('refuses a directory the connected bridge does not advertise', function () {
@@ -209,7 +209,7 @@ describe('choosing a workspace for a conversation', function () {
             Request::create('/ai-bridge/conversations', 'POST', [
                 'mode' => 'bridge',
                 'connection_id' => $connection->id,
-                'working_dir' => '/repos/studio',
+                'working_dir' => '/repos/acme-app',
             ])
         );
 
@@ -243,7 +243,7 @@ describe('the shape of a working directory', function () {
         $response = app(ConversationController::class)->store(
             Request::create('/ai-bridge/conversations', 'POST', [
                 'mode' => 'bridge',
-                'working_dir' => 'repos/studio',
+                'working_dir' => 'repos/acme-app',
             ])
         );
 
@@ -318,7 +318,7 @@ describe('a working directory outside bridge mode', function () {
         // the conversation a value it displays and no turn ever uses.
         $response = app(ConversationController::class)->store(
             Request::create('/ai-bridge/conversations', 'POST', [
-                'mode' => 'byok', 'working_dir' => '/repos/studio',
+                'mode' => 'byok', 'working_dir' => '/repos/acme-app',
             ])
         );
 
@@ -330,7 +330,7 @@ describe('a working directory outside bridge mode', function () {
 
         $response = app(ConversationController::class)->stream(
             Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
-                'message' => 'hi', 'working_dir' => '/repos/studio',
+                'message' => 'hi', 'working_dir' => '/repos/acme-app',
             ]),
             $conversation->id,
         );
@@ -352,7 +352,7 @@ describe('clearing a workspace', function () {
         $conversation = Conversation::create([
             'mode' => 'bridge', 'provider' => 'claude',
             'connection_id' => $connection->id,
-            'working_dir' => '/repos/studio',
+            'working_dir' => '/repos/acme-app',
             'cli_session_id' => 'sess-1',
         ]);
 
@@ -381,7 +381,7 @@ describe('clearing a workspace', function () {
         // and throw away the CLI session, with a 200 and nothing in the log.
         $conversation = Conversation::create([
             'mode' => 'bridge', 'provider' => 'claude',
-            'working_dir' => '/repos/studio',
+            'working_dir' => '/repos/acme-app',
             'cli_session_id' => 'sess-1',
         ]);
 
@@ -393,7 +393,7 @@ describe('clearing a workspace', function () {
         );
 
         $conversation->refresh();
-        expect($conversation->working_dir)->toBe('/repos/studio')
+        expect($conversation->working_dir)->toBe('/repos/acme-app')
             ->and($conversation->cli_session_id)->toBe('sess-1');
     });
 
@@ -445,13 +445,13 @@ describe('choosing a workspace after the session exists', function () {
         app(ConversationController::class)->stream(
             Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
                 'message' => 'now work in the repo',
-                'working_dir' => '/repos/studio',
+                'working_dir' => '/repos/acme-app',
             ]),
             $conversation->id,
         );
 
         $conversation->refresh();
-        expect($conversation->working_dir)->toBe('/repos/studio')
+        expect($conversation->working_dir)->toBe('/repos/acme-app')
             ->and($conversation->cli_session_id)->toBeNull();
     });
 });
@@ -466,7 +466,7 @@ describe('a refused turn', function () {
         $conversation = Conversation::create([
             'mode' => 'bridge', 'provider' => 'claude', 'model' => 'sonnet',
             'connection_id' => $connection->id,
-            'working_dir' => '/repos/studio',
+            'working_dir' => '/repos/acme-app',
         ]);
 
         $response = app(ConversationController::class)->stream(
@@ -489,7 +489,7 @@ describe('a conversation keeps its working directory', function () {
         $conversation = Conversation::create([
             'mode' => 'bridge',
             'provider' => 'claude',
-            'working_dir' => '/repos/studio',
+            'working_dir' => '/repos/acme-app',
         ]);
 
         $response = app(ConversationController::class)->stream(

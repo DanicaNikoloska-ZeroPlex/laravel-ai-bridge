@@ -58,7 +58,7 @@ docker run --rm -u $(id -u):$(id -g) -v $PWD:/app -w /app --entrypoint php compo
 - 0001 Additive protocol fields stay on protocol version 0.1.
 - 0002 The desired bridge version is strict semver and never below 0.24.0.
 - 0003 One bridge record: `bridge_version` remembered offline, `self_update` live only.
-- 0004 After merging the ZeroPlex fork's 0.16, numbering continues at 0.17.0.
+- 0004 After merging a fork's 0.16 back, numbering continues at 0.17.0.
 - 0005 MCP App card buttons go through the host's doorway, never tool calls.
 - 0006 The package keeps the name `tetrixdev/laravel-ai-bridge` after merging the fork's 0.18.
 - 0007 Upstream OAuth sign-in is relayed through a callback route; tokens stay on the bridge.

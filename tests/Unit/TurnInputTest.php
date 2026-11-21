@@ -408,7 +408,7 @@ it('the facade resolves to the manager that implements both', function () {
         ->and(method_exists(AiBridgeManager::class, 'inputOpen'))->toBeTrue();
 });
 
-// --- D09710 rework: a message into a running turn waits out a short drop ---
+// --- Short drops: a message into a running turn waits out a short drop ---
 
 /** turnInputRig() whose user-1 bridge announced reliable_delivery. */
 function reliableInputRig(float $timeout = 5.0): object
@@ -428,7 +428,7 @@ function reconnectWithTurn(object $rig): void
     $rig->manager->flushHeldFrames('user-1');
 }
 
-it('holds a message sent during a short drop and sends it after the reconnect while its caller still waits (#14256)', function () {
+it('holds a message sent during a short drop and sends it after the reconnect while its caller still waits', function () {
     $rig = reliableInputRig(0.05);
     $rig->manager->removeConnection('user-1', 'websocket_closed');
 
@@ -445,7 +445,7 @@ it('holds a message sent during a short drop and sends it after the reconnect wh
         ->and($out->responses)->toBe([['status' => 200, 'body' => ['status' => 'accepted']]]);
 });
 
-it('sends a message that was out when the machine dropped again after the reconnect, while its caller still waits (#14274)', function () {
+it('sends a message that was out when the machine dropped again after the reconnect, while its caller still waits', function () {
     $rig = reliableInputRig();
     $out = postInput($rig, INPUT_BODY);
 
@@ -460,7 +460,7 @@ it('sends a message that was out when the machine dropped again after the reconn
         ->and($out->responses)->toBe([['status' => 200, 'body' => ['status' => 'accepted']]]);
 });
 
-it('drops a message held past its caller\'s timeout and answers send_failed; it is never sent after the reconnect (#14334)', function () {
+it('drops a message held past its caller\'s timeout and answers send_failed; it is never sent after the reconnect', function () {
     $rig = reliableInputRig(0.05);
     $rig->manager->removeConnection('user-1', 'websocket_closed');
     $out = postInput($rig, INPUT_BODY);
@@ -474,7 +474,7 @@ it('drops a message held past its caller\'s timeout and answers send_failed; it 
     expect($rig->sent)->toBe([]);
 });
 
-it('answers no_answer for a message out when the machine drops and its caller\'s timeout passes; it is not sent again (#14334)', function () {
+it('answers no_answer for a message out when the machine drops and its caller\'s timeout passes; it is not sent again', function () {
     $rig = reliableInputRig(0.05);
     $out = postInput($rig, INPUT_BODY);
     $rig->manager->removeConnection('user-1', 'websocket_closed');
@@ -497,7 +497,7 @@ it('answers connection_lost when the machine does not come back within the grace
     expect($out->responses)->toBe([['status' => 200, 'body' => ['status' => 'rejected', 'reason' => 'connection_lost']]]);
 });
 
-it('holds a usage question asked during a short drop and answers it after the reconnect (#14256)', function () {
+it('holds a usage question asked during a short drop and answers it after the reconnect', function () {
     $rig = reliableInputRig();
     $rig->manager->removeConnection('user-1', 'websocket_closed');
 
@@ -526,7 +526,7 @@ it('holds a usage question asked during a short drop and answers it after the re
     expect($out->responses)->toBe([['status' => 200, 'body' => ['ok' => true, 'windows' => []]]]);
 });
 
-it('drops a usage question held past its caller\'s timeout and answers bridge_not_connected; it is never sent after the reconnect (#14334)', function () {
+it('drops a usage question held past its caller\'s timeout and answers bridge_not_connected; it is never sent after the reconnect', function () {
     config()->set('ai-bridge.server.usage_timeout', 0.05);
     $rig = reliableInputRig();
     $rig->manager->removeConnection('user-1', 'websocket_closed');
@@ -555,7 +555,7 @@ it('drops a usage question held past its caller\'s timeout and answers bridge_no
     expect($rig->sent)->toBe([]);
 });
 
-it('the one-second tick sends owed receipts, and fails detached turns past the grace period (#14262)', function () {
+it('the one-second tick sends owed receipts, and fails detached turns past the grace period', function () {
     config()->set('ai-bridge.websocket.reconnect_grace_seconds', 0);
     config()->set('ai-bridge.websocket.stream_ack_interval', 60);
     $rig = reliableInputRig();
@@ -583,7 +583,7 @@ it('the one-second tick sends owed receipts, and fails detached turns past the g
         ->and($rig->manager->isAwaitingReconnect('user-1'))->toBeFalse();
 });
 
-// --- D09710 review follow-up: held work is re-checked against the bridge that comes back ---
+// --- Short drops: held work is re-checked against the bridge that comes back ---
 
 it('does not send a held message to a reconnecting bridge without turn_input, and answers it at once (review point 5)', function (bool $outBeforeDrop, string $reason) {
     $rig = reliableInputRig();

@@ -47,7 +47,7 @@ test('the two builders produce the same payload from equivalent inputs', functio
         'max_tokens' => 1000,
         'cli_session_id' => null,
         'messages' => [['role' => 'user', 'content' => 'earlier']],
-        'working_dir' => '/repos/studio',
+        'working_dir' => '/repos/acme-app',
         'attachments' => [[
             'id' => 'att_1', 'name' => 'a.pdf', 'mime_type' => 'application/pdf',
             'size' => 10, 'sha256' => 'ABC', 'url' => 'https://x.test/a',
@@ -65,7 +65,7 @@ test('the two builders produce the same payload from equivalent inputs', functio
         'cli_session_id' => null,
         'history' => [['role' => 'user', 'content' => 'earlier']],
         'tools' => [],
-        'working_dir' => '/repos/studio',
+        'working_dir' => '/repos/acme-app',
         'attachments' => [[
             'id' => 'att_1', 'name' => 'a.pdf', 'mime_type' => 'application/pdf',
             'size' => 10, 'sha256' => 'ABC', 'url' => 'https://x.test/a',
@@ -146,10 +146,10 @@ test('working_dir is carried through', function () {
     $payload = AiRequestPayload::build([
         'request_id' => 'req_1',
         'message' => 'hi',
-        'working_dir' => '/Users/jasper/zp-studio/studio',
+        'working_dir' => '/home/me/projects/acme-app',
     ]);
 
-    expect($payload['working_dir'])->toBe('/Users/jasper/zp-studio/studio');
+    expect($payload['working_dir'])->toBe('/home/me/projects/acme-app');
 });
 
 test('attachments are reduced to exactly the six protocol fields', function () {
@@ -162,7 +162,7 @@ test('attachments are reduced to exactly the six protocol fields', function () {
             'mime_type' => 'application/pdf',
             'size' => '482113',
             'sha256' => '9F3C',
-            'url' => 'https://studio.test/ai-bridge/attachments/att_1',
+            'url' => 'https://app.test/ai-bridge/attachments/att_1',
             'internal_note' => 'should not travel',
         ]],
     ]);
@@ -175,7 +175,7 @@ test('attachments are reduced to exactly the six protocol fields', function () {
         'size' => 482113,
         // Lowercased, because the bridge compares it against a hex digest.
         'sha256' => '9f3c',
-        'url' => 'https://studio.test/ai-bridge/attachments/att_1',
+        'url' => 'https://app.test/ai-bridge/attachments/att_1',
     ]);
 });
 

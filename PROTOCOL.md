@@ -236,7 +236,7 @@ A bridge started with `--allow-dir` also advertises the directories it will acce
   "bridge_version": "0.2.0",
   "providers": [ "..." ],
   "workspaces": [
-    { "path": "/Users/jasper/zp-studio/zeroplex-studio/ZeroPlex_Studio__D09042", "label": "Studio D09042" }
+    { "path": "/home/me/projects/acme-app", "label": "Acme app" }
   ]
 }
 ```
@@ -790,7 +790,7 @@ Where the CLI should be spawned. Optional; **absent means today's behaviour exac
 {
   "type": "ai_request",
   "request_id": "req_abc123",
-  "working_dir": "/Users/jasper/zp-studio/zeroplex-studio/ZeroPlex_Studio__D09042"
+  "working_dir": "/home/me/projects/acme-app"
 }
 ```
 
@@ -834,7 +834,7 @@ Files the assistant should be able to read this turn. References, never bytes:
     "mime_type": "application/pdf",
     "size": 482113,
     "sha256": "9f3c...",
-    "url": "https://studio.example.com/ai-bridge/attachments/att_9f3c"
+    "url": "https://app.example.com/ai-bridge/attachments/att_9f3c"
   }
 ]
 ```
@@ -1109,7 +1109,7 @@ In this package the one-time URL is the public WebSocket URL plus `?transfer=<id
 ### Upload
 
 ```json
-{ "type": "upload_offer", "id": "u1", "url": "https://studio.example/api/ai-bridge/ws?transfer=u1",
+{ "type": "upload_offer", "id": "u1", "url": "https://app.example/api/ai-bridge/ws?transfer=u1",
   "working_dir": "/home/dev/repo", "name": "report.pdf", "mime_type": "application/pdf", "size": 48213 }
 ```
 
@@ -1413,7 +1413,7 @@ bridge sends:
 
 ```json
 "ui": {
-  "resource_uri": "ui://studio/grant-request",
+  "resource_uri": "ui://app/grant-request",
   "tool_name": "show_grant_request",
   "arguments": { "grant_id": 42 },
   "result": {
@@ -1766,7 +1766,7 @@ the bridge only carries two things through, and needs to be 0.27.0 or newer to d
      "name": "show_grant_request",
      "description": "Show the person a grant request to confirm",
      "parameters": { "type": "object", "properties": { "grant_id": { "type": "integer", "description": "The grant request" } } },
-     "_meta": { "ui": { "resourceUri": "ui://studio/grant-request" } }
+     "_meta": { "ui": { "resourceUri": "ui://app/grant-request" } }
    }
    ```
 2. **`provider_tool_call_id` on `tool_call`.** The CLI's own id for the call (`toolu_…` for

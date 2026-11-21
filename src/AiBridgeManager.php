@@ -750,7 +750,7 @@ class AiBridgeManager
                 'tool_call_id' => $callId,
                 'call_id' => $callId, // Deprecated: use tool_call_id instead
             ];
-            // #11493: the CLI's own id for this call, as BufferingSink::attach() forwards it,
+            // The CLI's own id for this call, as BufferingSink::attach() forwards it,
             // so a consumer of this sink can join a server tool_call to its tool_result and
             // card too. Absent when the bridge does not report it.
             if ($providerToolCallId !== null && $providerToolCallId !== '') {
@@ -975,8 +975,8 @@ class AiBridgeManager
     /**
      * Register how an attachment id is turned into a file on disk.
      *
-     * The package deliberately owns no file storage. Studio and `zeroplex/ai`
-     * already have attachment stores of their own, and so will anything else
+     * The package deliberately owns no file storage. A host application
+     * already has an attachment store of its own, as will anything else
      * that uses this package — a storage opinion baked in here would have to
      * be fought in every consumer. Same pattern as the conversation and
      * connection resolvers above.

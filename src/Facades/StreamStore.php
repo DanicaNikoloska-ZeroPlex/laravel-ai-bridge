@@ -16,7 +16,7 @@ use Tetrix\AiBridge\Streaming\StreamStoreManager;
  * need a non-default driver call `StreamStore::driver('foo')`; apps that
  * want to register their own driver call `StreamStore::extend('foo', …)`.
  *
- * `putValue` / `getValue` are optional (#11495): they exist only when the active driver
+ * `putValue` / `getValue` are optional: they exist only when the active driver
  * implements {@see \Tetrix\AiBridge\Contracts\StoresStreamValues}. Both bundled drivers do;
  * a custom driver that does not throws "Call to undefined method" when they are called
  * here, rather than doing nothing. Check `StreamStore::driver() instanceof StoresStreamValues`

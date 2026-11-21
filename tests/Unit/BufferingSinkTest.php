@@ -147,7 +147,7 @@ test('a server tool_call carries the CLI\'s own call id when the bridge reports 
 });
 
 test('the direct SSE path carries the CLI\'s own call id on a server tool_call too', function () {
-    // #11493: streamToResponse() / POST /ai-bridge/stream/sse must join a server tool_call
+    // streamToResponse() / POST /ai-bridge/stream/sse must join a server tool_call
     // to its tool_result and card exactly as the buffered path does.
     $sent = [];
     $handler = new StreamHandler(fakeBufferProvider(), 'rid-sse-tool-id');
@@ -489,7 +489,7 @@ test('pending_inputs reaches the browser as non-empty string ids only, on done a
         ->and(BufferingSink::publicCancelledMeta(['pending_inputs' => ['m3', null]]))->toBe(['pending_inputs' => ['m3']]);
 });
 
-test('an error the bridge stopped on its own bound keeps limit_seconds for the chat (D09710)', function () {
+test('an error the bridge stopped on its own bound keeps limit_seconds for the chat', function () {
     $store = new ArrayStreamStore();
     $handler = new StreamHandler(fakeBufferProvider(), 'rid-limit');
     BufferingSink::attach($handler, $store);
@@ -500,7 +500,7 @@ test('an error the bridge stopped on its own bound keeps limit_seconds for the c
     expect($error['data'])->toBe(['code' => 'request_timeout_exceeded', 'message' => 'ran past the limit', 'limit_seconds' => 86400]);
 });
 
-test('limit_seconds reaches the browser only as a positive whole number (D09710)', function () {
+test('limit_seconds reaches the browser only as a positive whole number', function () {
     expect(BufferingSink::publicErrorMeta(['limit_seconds' => 900]))->toBe(['limit_seconds' => 900])
         ->and(BufferingSink::publicErrorMeta(['limit_seconds' => 0]))->toBe([])
         ->and(BufferingSink::publicErrorMeta(['limit_seconds' => '900']))->toBe([])
