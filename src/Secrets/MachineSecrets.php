@@ -23,13 +23,14 @@ use Tetrix\AiBridge\Upstreams\UpstreamClient;
  *
  * A value goes in and never comes out: nothing here returns, logs or stores one. It travels as
  * JSON from this process to the serve process (POST /api/secrets) and from there in the
- * `secret_put` frame, so keep `AI_BRIDGE_RELAY_URL` local or https, and exclude
- * `/api/secrets` from HTTP recorders such as Telescope.
+ * `secret_put` frame, so keep `AI_BRIDGE_RELAY_URL` local or https. The request goes through
+ * Laravel's HTTP client, so a recorder of outgoing requests sees it: with Telescope, call
+ * `Telescope::hideRequestParameters(['value'])`.
  *
  * Every method answers an array `{ok: bool, ...}` and never throws for a refusal. On failure
  * `code` is the machine's (`store_unavailable`, `not_found`, `invalid_name`, `invalid_request`,
  * `exists`, `timeout`, `failed`) or one decided on the way (`machine_secrets_unsupported`,
- * `replace_unsupported`, `not_connected`, `unreachable`, `send_failed`). For a put, describe
+ * `machine_secrets_outdated`, `not_connected`, `unreachable`, `send_failed`). For a put, describe
  * or remove whose outcome cannot be known (`timeout`, `unreachable`, a bridge that dropped
  * after it was sent) the answer also carries `result_unknown: true`: list the secrets again
  * before retrying.
@@ -68,12 +69,12 @@ class MachineSecrets
 
     /**
      * Add a secret. An existing name is refused with `exists` unless `$replace` is true; a
-     * bridge older than revision 2 is never asked to replace (`replace_unsupported`). On
+     * bridge older than revision 2 is sent nothing (`machine_secrets_outdated`). On
      * success `replaced` says whether an existing secret was overwritten.
      *
      * @return array{ok: bool, replaced?: bool, code?: string, error?: string, result_unknown?: true}
      */
-    public function put(Connection $connection, string $name, string $value, ?string $description = null, bool $replace = false): array
+    public function put(Connection $connection, string $name, #[\SensitiveParameter] string $value, ?string $description = null, bool $replace = false): array
     {
         $answer = $this->call($connection, array_filter([
             'op' => 'put',
@@ -117,7 +118,7 @@ class MachineSecrets
      * @param  array<string, mixed>  $body
      * @return array<string, mixed>
      */
-    private function call(Connection $connection, array $body): array
+    private function call(Connection $connection, #[\SensitiveParameter] array $body): array
     {
         $frame = SecretRequest::frameOf($body);
         if (! isset($frame['type'])) {
@@ -151,7 +152,7 @@ class MachineSecrets
      * @param  array<string, mixed>  $body
      * @return array<string, mixed>
      */
-    private function relay(string $connectionKey, array $body, int $timeout): array
+    private function relay(string $connectionKey, #[\SensitiveParameter] array $body, int $timeout): array
     {
         try {
             $relayToken = $this->tokenManager->generate($connectionKey, ['scope' => TokenManager::INTERNAL_RELAY_SCOPE], 60);

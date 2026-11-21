@@ -2104,14 +2104,17 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
 | `secret_remove` | `{id, name}` |
 
 - `name`: 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`, no
-  trailing newline, never `index.json` (the package matches `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/`
-  and refuses `..` and `index.json`). The bridge checks it again.
-- `description`: UTF-8 text of at most 1000 characters (code points), no NUL. Optional on
+  trailing newline, never `index.json` in any case (the package matches
+  `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/` and refuses `..` and `index.json`). The bridge checks it
+  again, and refuses a name that differs from an existing one only in case (`exists`).
+- `description`: UTF-8 text of at most 1000 characters (code points), no control characters but
+  tab and newline. Optional on
   `secret_put`; a replace without one keeps the old description. `""` on `secret_describe` clears it.
 - `value` (only `secret_put`): UTF-8 text of 1 byte to 64 KiB.
 - `replace` (only `secret_put`, revision 2): `true` to overwrite an existing secret. Absent, an
-  existing name is refused with `exists`. A revision-1 bridge replaced without saying so: the
-  server never sends it `replace` (`replace_unsupported`).
+  existing name is refused with `exists`. Revision 1 was an unreleased draft that overwrote
+  without saying so: the server sends no `secret_*` frame to a bridge below revision 2
+  (`machine_secrets_outdated`).
 
 ### Bridge → Server: `secret_result`
 
@@ -2133,10 +2136,12 @@ successful `secret_put`, revision 2) says whether an existing secret was overwri
 `POST /api/secrets` (internal API, relay token) takes `{op: list|put|describe|remove, name?,
 description?, value?, replace?}`, checks it with the rules above (400 `invalid_name` /
 `invalid_request`), sends the frame and answers with the `secret_result`. Without
-`hello.machine_secrets`: 409 `machine_secrets_unsupported`; a replace to a bridge below revision 2:
-409 `replace_unsupported`; nothing is sent in either case. No answer within
+`hello.machine_secrets`: 409 `machine_secrets_unsupported`; a bridge below revision 2 (or without
+one): 409 `machine_secrets_outdated`; nothing is sent in either case. No answer within
 `ai-bridge.machine_secrets.timeout` (20 s): 504 `timeout`. A put, describe or remove that was sent
-and not answered (504, or the bridge dropped: 404 `not_connected`) carries `result_unknown: true`.
+and not answered (504, or the bridge dropped: 404 `not_connected`) carries `result_unknown: true`;
+the bridge's own `timeout` is passed on as a 200 `secret_result`, which `AiBridge::secrets()` marks
+`result_unknown: true` for a write.
 
 `AiBridge::secrets()` (`Secrets\MachineSecrets`), for a `Connection` the caller already resolved
 through its own scope: `supported($connection)`, `list($connection)`,
@@ -2146,8 +2151,11 @@ through its own scope: `supported($connection)`, `list($connection)`,
 `unreachable`, a drop after sending) carries `result_unknown: true`.
 
 The value travels as JSON from the app's process to the serve process, then in the frame. Keep
-`AI_BRIDGE_RELAY_URL` local or https, and exclude `/api/secrets` from HTTP recorders such as
-Telescope.
+`AI_BRIDGE_RELAY_URL` local or https. The request is made with Laravel's HTTP client, so anything
+that records outgoing client requests sees the body: with Telescope, call
+`Telescope::hideRequestParameters(['value'])` (its client request watcher hides those keys), and
+keep other outgoing-request loggers away from `/api/secrets`. (`/api/secrets` itself is served by
+the serve process, which Laravel's HTTP kernel and Telescope's request watcher never see.)
 
 ---
 

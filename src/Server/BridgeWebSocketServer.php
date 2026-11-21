@@ -1139,7 +1139,9 @@ class BridgeWebSocketServer
         }
 
         // A bridge_prompt over what this bridge takes is refused here, before the turn starts.
-        $promptRefusal = AiRequestPayload::bridgePromptRefusal($payload, $this->connectionManager->getBridgeInfo($userId));
+        // From the dropped connection too while a short drop is waited out: a bridge briefly away
+        // still takes what it announced.
+        $promptRefusal = AiRequestPayload::bridgePromptRefusal($payload, $this->connectionManager->reachableBridgeInfo($userId));
         if ($promptRefusal !== null) {
             $this->httpResponse($tcpConnection, 400, [
                 'error' => AiRequestPayload::BRIDGE_PROMPT_TOO_LARGE,
@@ -1334,8 +1336,8 @@ class BridgeWebSocketServer
      * `secret_*` frame with a fresh id and answers with the bridge's `secret_result`
      * (`{ok, secrets?, replaced?, code?, error?}`). Refused without sending anything: 409
      * `machine_secrets_unsupported` for a bridge whose hello had no `machine_secrets` (its
-     * operator did not opt in), 409 `replace_unsupported` for a replace to a bridge below
-     * revision 2. 504 `timeout` after `ai-bridge.machine_secrets.timeout` seconds; a put,
+     * operator did not opt in), 409 `machine_secrets_outdated` for any operation on a bridge below
+     * revision 2 (an unreleased draft that could overwrite without saying so). 504 `timeout` after `ai-bridge.machine_secrets.timeout` seconds; a put,
      * describe or remove that was sent and not answered (timeout, or the bridge dropped) also
      * carries `result_unknown: true`: list the secrets again before retrying.
      *
@@ -1358,14 +1360,16 @@ class BridgeWebSocketServer
             return;
         }
 
-        // Revision 2 refuses an existing name unless `replace` is true. An older bridge would
-        // overwrite without saying so, so it is never asked to replace.
+        // Revision 2 refuses an existing name unless `replace` is true. Revision 1 was an
+        // unreleased draft that overwrote without saying so, and a bridge without a revision says
+        // nothing about either: neither is sent any secret_* frame, so no put can overwrite
+        // silently.
         $revision = $this->connectionManager->reachableBridgeInfo($userId)['machine_secrets']['revision'] ?? null;
-        if (($frame['replace'] ?? false) === true && (! is_int($revision) || $revision < 2)) {
+        if (! is_int($revision) || $revision < 2) {
             $this->httpResponse($tcpConnection, 409, [
                 'ok' => false,
-                'code' => 'replace_unsupported',
-                'error' => 'Replacing a secret needs a newer bridge on this machine; remove it first, then add it again.',
+                'code' => 'machine_secrets_outdated',
+                'error' => 'The bridge on this machine manages secrets in an older way; update it (ai-bridge 0.46.0 or newer).',
             ]);
 
             return;

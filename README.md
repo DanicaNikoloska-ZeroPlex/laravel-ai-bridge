@@ -1347,18 +1347,23 @@ if ($secrets->supported($connection)) {
 - Every call answers `['ok' => bool, ...]` and never throws for a refusal. A failure's `code` is
   the machine's (`store_unavailable`, `not_found`, `invalid_name`, `invalid_request`, `exists`,
   `timeout`, `failed`) or one decided on the way (`machine_secrets_unsupported`,
-  `replace_unsupported`, `not_connected`, `unreachable`).
+  `machine_secrets_outdated`, `not_connected`, `unreachable`, `send_failed`).
 - A put, describe or remove that may or may not have happened (the machine's store did not
   answer in time, nobody answered in time, the bridge dropped after it was sent) carries
   `result_unknown: true`: list the secrets again before retrying.
 - Names are 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..` or
-  `index.json`;
-  descriptions are UTF-8, at most 1000 characters with no NUL; values are UTF-8, at
-  most 64 KiB. Checked here before anything is sent, and again by the bridge.
-- `replace: true` needs a bridge of revision 2 (`replace_unsupported` otherwise).
+  `index.json` (in any case); descriptions are UTF-8, at most 1000 characters, with no control
+  characters but tab and newline; values are UTF-8, at most 64 KiB. Checked here before anything
+  is sent, and again by the bridge.
+- A bridge below revision 2 (an unreleased draft) is sent nothing: `machine_secrets_outdated`.
 - **The value travels as JSON** from your process to the `ai-bridge:serve` process
-  (`POST /api/secrets`), then to the bridge. Keep `AI_BRIDGE_RELAY_URL` local or https, and
-  exclude `/api/secrets` from HTTP recorders such as Telescope. The package never logs it.
+  (`POST /api/secrets`), then to the bridge, through Laravel's HTTP client. Keep
+  `AI_BRIDGE_RELAY_URL` local or https. Anything that records outgoing client requests sees the
+  body: with Telescope, call `Telescope::hideRequestParameters(['value'])` in your
+  `TelescopeServiceProvider`, and keep other outgoing-request loggers away from `/api/secrets`.
+  The package never logs it.
+- `supported()` reads what the bridge announced when it last connected, so it can be true while
+  the machine is off: check the connection's `connected` too before offering the feature.
 - `ConnectionStatus::for()` and `GET /ai-bridge/connections` report `machine_secrets`.
   `ai-bridge.machine_secrets.timeout` (`AI_BRIDGE_MACHINE_SECRETS_TIMEOUT`, 20 s) is how long
   the serve process waits.

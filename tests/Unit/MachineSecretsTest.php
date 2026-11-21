@@ -184,17 +184,20 @@ describe('POST /api/secrets', function () {
             ->and($replaced->responses[0]['body'])->toBe(['ok' => true, 'replaced' => true]);
     });
 
-    it('never asks a revision 1 bridge to replace (409 replace_unsupported), but still adds through it', function () {
+    it('sends a revision 1 bridge nothing at all (409 machine_secrets_outdated): its plain put overwrote silently', function (array $body) {
         $rig = secretsRig();
 
-        $out = secretsPost($rig, '/api/secrets', ['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE, 'replace' => true], 'key-r1');
-        secretsPost($rig, '/api/secrets', ['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE], 'key-r1');
+        $out = secretsPost($rig, '/api/secrets', $body, 'key-r1');
 
         expect($out->responses[0]['status'])->toBe(409)
-            ->and($out->responses[0]['body']['code'])->toBe('replace_unsupported')
-            ->and($rig->sent)->toHaveCount(1)
-            ->and($rig->sent[0])->not->toHaveKey('replace');
-    });
+            ->and($out->responses[0]['body']['code'])->toBe('machine_secrets_outdated')
+            ->and($out->responses[0]['raw'])->not->toContain(SECRET_VALUE)
+            ->and($rig->sent)->toBe([]);
+    })->with([
+        'put' => [['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE]],
+        'replace' => [['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE, 'replace' => true]],
+        'list' => [['op' => 'list']],
+    ]);
 
     it('sends describe and remove as the machine expects them', function () {
         $rig = secretsRig();
@@ -276,6 +279,8 @@ describe('POST /api/secrets', function () {
         'path' => [['op' => 'remove', 'name' => 'a/b'], 'invalid_name'],
         'description with a NUL' => [['op' => 'describe', 'name' => 'stripe', 'description' => "a\0b"], 'invalid_request'],
         'the index file' => [['op' => 'remove', 'name' => 'index.json'], 'invalid_name'],
+        'the index file, other case' => [['op' => 'remove', 'name' => 'INDEX.json'], 'invalid_name'],
+        'escape sequence in a description' => [['op' => 'describe', 'name' => 'stripe', 'description' => "x\e[2Jy"], 'invalid_request'],
         'no value' => [['op' => 'put', 'name' => 'stripe'], 'invalid_request'],
         'replace not a boolean' => [['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE, 'replace' => 'yes'], 'invalid_request'],
     ]);
@@ -298,7 +303,10 @@ describe('SecretRequest', function () {
             ->and(SecretRequest::descriptionRefusal(str_repeat('é', 1001)))->not->toBeNull()
             ->and(SecretRequest::descriptionRefusal("a\0b"))->not->toBeNull()
             ->and(SecretRequest::descriptionRefusal("\xC3\x28"))->not->toBeNull()
-            ->and(SecretRequest::descriptionRefusal('-n'))->toBeNull();
+            ->and(SecretRequest::descriptionRefusal('-n'))->toBeNull()
+            ->and(SecretRequest::descriptionRefusal("two\tparts\nand a line"))->toBeNull()
+            ->and(SecretRequest::descriptionRefusal("bell\x07"))->not->toBeNull()
+            ->and(SecretRequest::descriptionRefusal("c1\u{9B}"))->not->toBeNull();
     });
 
     it('takes a UTF-8 value of 1 byte to 64 KiB, and never quotes it when refusing', function () {
@@ -369,6 +377,13 @@ describe('AiBridge::secrets()', function () {
 
         expect(AiBridge::secrets()->remove($this->connection, 'stripe'))->toMatchArray(['code' => 'timeout', 'result_unknown' => true])
             ->and(AiBridge::secrets()->put($this->connection, 'stripe', SECRET_VALUE)['error'])->toBe('could not store [value]');
+    });
+
+    it('marks a write the machine answered timeout (a 200 secret_result) as unknown', function () {
+        Http::fake(['*/api/secrets' => Http::response(['ok' => false, 'code' => 'timeout', 'error' => 'The secret store did not finish within 15 s.'])]);
+
+        expect(AiBridge::secrets()->describe($this->connection, 'stripe', 'x'))->toMatchArray(['ok' => false, 'code' => 'timeout', 'result_unknown' => true])
+            ->and(AiBridge::secrets()->list($this->connection))->not->toHaveKey('result_unknown');
     });
 });
 

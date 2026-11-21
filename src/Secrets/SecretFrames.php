@@ -17,7 +17,7 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 final class SecretFrames
 {
     /** The codes a failed `secret_result` may carry; anything else becomes `failed`. */
-    public const CODES = ['store_unavailable', 'not_found', 'invalid_name', 'invalid_request', 'exists', 'timeout', 'failed'];
+    public const CODES = ['machine_secrets_unsupported', 'store_unavailable', 'not_found', 'invalid_name', 'invalid_request', 'exists', 'timeout', 'failed'];
 
     /** The most rows one list answer is read for. */
     private const MAX_ROWS = 1000;

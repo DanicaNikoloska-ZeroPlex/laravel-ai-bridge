@@ -36,7 +36,7 @@ final class SecretRequest
     public static function nameRefusal(mixed $name): ?string
     {
         // index.json is the bridge's own index of descriptions, never a secret.
-        if (! is_string($name) || preg_match(self::NAME_PATTERN, $name) !== 1 || str_contains($name, '..') || $name === 'index.json') {
+        if (! is_string($name) || preg_match(self::NAME_PATTERN, $name) !== 1 || str_contains($name, '..') || strtolower($name) === 'index.json') {
             return 'A secret name is 1 to 64 characters: letters, digits, ".", "_" or "-", starting with a letter or digit, never ".." (and not "index.json").';
         }
 
@@ -52,14 +52,16 @@ final class SecretRequest
         if (mb_strlen($description, 'UTF-8') > self::MAX_DESCRIPTION) {
             return 'A description is at most '.self::MAX_DESCRIPTION.' characters.';
         }
-        if (str_contains($description, "\0")) {
-            return 'A description must not contain a NUL character.';
+        // As the bridge: no control characters but tab and newline, since `aib secret list`
+        // prints descriptions to a terminal.
+        if (preg_match('/[\x{0000}-\x{0008}\x{000B}-\x{001F}\x{007F}-\x{009F}]/u', $description) === 1) {
+            return 'A description must not contain control characters (tab and newline are fine).';
         }
         return null;
     }
 
     /** Why `$value` cannot be sent, or null when it can. Never quotes the value. */
-    public static function valueRefusal(mixed $value): ?string
+    public static function valueRefusal(#[\SensitiveParameter] mixed $value): ?string
     {
         if (! is_string($value) || $value === '') {
             return 'A secret value must be a non-empty string.';
@@ -82,7 +84,7 @@ final class SecretRequest
      * @param  array<string, mixed>  $body
      * @return array<string, mixed>
      */
-    public static function frameOf(array $body): array
+    public static function frameOf(#[\SensitiveParameter] array $body): array
     {
         $refused = static fn (string $error, string $code = 'invalid_request'): array => ['code' => $code, 'error' => $error];
 

@@ -30,6 +30,8 @@ send a longer prompt to a bridge that also managed secrets.
   frame to a machine.
 - A write that was sent and not answered, or that the bridge answered `timeout` (its store did
   not finish within 15 s), is reported as `result_unknown`, never as failed.
+- A bridge below revision 2, or announcing no revision, is sent no `secret_*` frame
+  (`machine_secrets_outdated`): revision 1 was an unreleased draft that overwrote on a plain put.
 - The prompt cap is its own hello field, `bridge_prompt_max_bytes`: 16 KB only to a bridge that
   announces at least 16384, 8 KB otherwise, refused before sending (`bridge_prompt_too_large`).
 
@@ -39,7 +41,8 @@ send a longer prompt to a bridge that also managed secrets.
   `AiBridge::secrets()->supported()` (or `machine_secrets` on the connection status) before
   offering it.
 - The value passes through the serve process's internal API as JSON: `AI_BRIDGE_RELAY_URL` should
-  be local or https, and HTTP recorders should exclude `/api/secrets`.
+  be local or https, and a recorder of outgoing HTTP client requests (Telescope:
+  `hideRequestParameters(['value'])`) must not keep the body.
 - A longer prompt does not depend on secrets, and a bridge can raise its cap later by announcing a
   larger number.
 
