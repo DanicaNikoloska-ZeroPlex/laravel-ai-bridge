@@ -71,7 +71,7 @@ class ConnectionController extends Controller
                 $data['mcp_upstream_auth'] = $status['mcp_upstream_auth'] ?? false;
                 $data['upstream_status'] = $status['upstream_status'] ?? [];
                 // Whether the app can manage the machine's secret store through it (the operator
-                // opted in with --secret-command), and the largest bridge_prompt.text it takes.
+                // opted in with --machine-secrets), and the largest bridge_prompt.text it takes.
                 $data['machine_secrets'] = $status['machine_secrets'] ?? false;
                 $data['bridge_prompt_max_bytes'] = $status['bridge_prompt_max_bytes'] ?? \Tetrix\AiBridge\Protocol\AiRequestPayload::DEFAULT_BRIDGE_PROMPT_BYTES;
                 $data['connected'] = $status['connected'];

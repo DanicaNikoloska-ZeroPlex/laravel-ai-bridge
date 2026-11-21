@@ -657,7 +657,7 @@ class MessageHandler
      * `mcp_upstream_auth` is `{revision}` when the bridge implements OAuth sign-in to its
      * upstream MCP servers (the `upstream_auth_*` frames), or null.
      * `machine_secrets` is `{revision}` when the bridge manages the machine's secret store for
-     * the app (the `secret_*` frames; only when its operator named a secret command), or null.
+     * the app (the `secret_*` frames; only when its operator passed --machine-secrets), or null.
      * `bridge_prompt_max_bytes` is the largest `bridge_prompt.text` the bridge takes, in bytes,
      * when it says so (a positive integer), or null: then it takes 8 KB (see
      * AiRequestPayload::bridgePromptCap()).

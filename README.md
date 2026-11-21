@@ -1324,10 +1324,11 @@ Two things to get right:
 
 `AiBridge::secrets()` manages the secret store on a person's machine through its bridge: list
 the secrets, add or replace one, change a description, remove one. It works only with a bridge
-whose operator started it with `--secret-command <absolute path>`: only such a bridge announces
-`machine_secrets` at hello, and every other bridge is never sent a `secret_*` frame (the answer is
-`machine_secrets_unsupported`). The machine keeps the secrets; the bridge only runs the
-operator's command. A value goes in and never comes out.
+whose operator started it with `--machine-secrets` (ai-bridge 0.46.0+): only such a bridge
+announces `machine_secrets` at hello, and every other bridge is never sent a `secret_*` frame (the
+answer is `machine_secrets_unsupported`). The bridge keeps the secrets in its own store on the
+machine (`~/.ai-bridge/secrets`, one file per secret, readable only by the machine's user), which
+the person there also uses with `aib secret`. A value goes in and never comes out.
 
 ```php
 $secrets = AiBridge::secrets();
@@ -1344,14 +1345,15 @@ if ($secrets->supported($connection)) {
 ```
 
 - Every call answers `['ok' => bool, ...]` and never throws for a refusal. A failure's `code` is
-  the machine's (`no_secret_tool`, `not_found`, `invalid_name`, `invalid_request`, `exists`,
+  the machine's (`store_unavailable`, `not_found`, `invalid_name`, `invalid_request`, `exists`,
   `timeout`, `failed`) or one decided on the way (`machine_secrets_unsupported`,
   `replace_unsupported`, `not_connected`, `unreachable`).
-- A put, describe or remove that may or may not have happened (the machine's command was
-  stopped, nobody answered in time, the bridge dropped after it was sent) carries
+- A put, describe or remove that may or may not have happened (the machine's store did not
+  answer in time, nobody answered in time, the bridge dropped after it was sent) carries
   `result_unknown: true`: list the secrets again before retrying.
-- Names are 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`;
-  descriptions are UTF-8, at most 1000 characters and never start with `-`; values are UTF-8, at
+- Names are 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..` or
+  `index.json`;
+  descriptions are UTF-8, at most 1000 characters with no NUL; values are UTF-8, at
   most 64 KiB. Checked here before anything is sent, and again by the bridge.
 - `replace: true` needs a bridge of revision 2 (`replace_unsupported` otherwise).
 - **The value travels as JSON** from your process to the `ai-bridge:serve` process

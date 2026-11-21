@@ -9,25 +9,27 @@ revisit_when: a bridge's machine secrets need to be readable by the app (a value
 
 ## Context
 
-An app may want to manage the secret store on a person's machine for them: list it, add a
-secret, describe one, remove one. The bridge can do this by running a command on the machine,
-which only the machine's operator can decide to allow. A first draft let the bridge announce the
-feature whenever it found a particular tool on the machine, and tied a larger `bridge_prompt.text`
-cap (16 KB instead of 8 KB) to the same hello field, so a server could only send a longer prompt
-to a bridge that also managed secrets.
+An app may want to manage a secret store on a person's machine for them: list it, add a
+secret, describe one, remove one. ai-bridge 0.46.0 keeps such a store itself
+(`~/.ai-bridge/secrets`, one 0600 file per secret, used on the machine with `aib secret`), and
+whether a server may manage it is the machine's operator's decision. A first draft let the bridge
+announce the feature whenever it found a particular tool on the machine, and tied a larger
+`bridge_prompt.text` cap (16 KB instead of 8 KB) to the same hello field, so a server could only
+send a longer prompt to a bridge that also managed secrets.
 
 ## Decision
 
 - The server sends `secret_*` frames only to a bridge whose hello carries `machine_secrets`, which
-  ai-bridge sends only when its operator started it with `--secret-command`. Every other bridge is
+  ai-bridge sends only when its operator started it with `--machine-secrets`. Every other bridge is
   answered `machine_secrets_unsupported` without a frame being sent. The frames keep the shape of
   the first draft (`secret_list`, `secret_put`, `secret_describe`, `secret_remove`,
   `secret_result`), so a host built on it keeps working.
 - A value only travels in: on `secret_put`. No answer, error or log here carries one. Requests are
-  checked in the web process and again in the serve process (name `\z`-anchored, UTF-8,
-  descriptions not starting with `-`), so a relay token alone cannot get a malformed frame to a
-  machine.
-- A write that was sent and not answered is reported as `result_unknown`, never as failed.
+  checked in the web process and again in the serve process (name `\z`-anchored and never
+  `index.json`, UTF-8, descriptions without NUL), so a relay token alone cannot get a malformed
+  frame to a machine.
+- A write that was sent and not answered, or that the bridge answered `timeout` (its store did
+  not finish within 15 s), is reported as `result_unknown`, never as failed.
 - The prompt cap is its own hello field, `bridge_prompt_max_bytes`: 16 KB only to a bridge that
   announces at least 16384, 8 KB otherwise, refused before sending (`bridge_prompt_too_large`).
 
@@ -45,5 +47,9 @@ to a bridge that also managed secrets.
 
 - Announce `machine_secrets` whenever the machine has a known secret tool: rejected, because
   whether a server may change secrets on a machine is the operator's choice, like `--local-tools`.
+- Have the bridge run an operator-named command for every operation (`--secret-command`):
+  rejected in ai-bridge's own decision 0020, because the guarantees (file modes, atomic writes,
+  never printing a value) would rest on a program the bridge does not ship. The frames did not
+  change with it.
 - Keep the 16 KB cap tied to `machine_secrets`: rejected, because the two have nothing to do with
   each other, and a bridge without secrets would be held to 8 KB for no reason.

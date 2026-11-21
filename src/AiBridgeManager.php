@@ -173,7 +173,7 @@ class AiBridgeManager
     /**
      * The secret store on a person's machine, through its bridge: list, put, describe and
      * remove. A value goes in and never comes out. Only for a bridge whose operator opted in
-     * (`--secret-command`). See Secrets\MachineSecrets.
+     * (`--machine-secrets`). See Secrets\MachineSecrets.
      */
     public function secrets(): \Tetrix\AiBridge\Secrets\MachineSecrets
     {

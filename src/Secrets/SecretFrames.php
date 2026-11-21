@@ -17,7 +17,7 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 final class SecretFrames
 {
     /** The codes a failed `secret_result` may carry; anything else becomes `failed`. */
-    public const CODES = ['no_secret_tool', 'not_found', 'invalid_name', 'invalid_request', 'exists', 'timeout', 'failed'];
+    public const CODES = ['store_unavailable', 'not_found', 'invalid_name', 'invalid_request', 'exists', 'timeout', 'failed'];
 
     /** The most rows one list answer is read for. */
     private const MAX_ROWS = 1000;
@@ -81,7 +81,7 @@ final class SecretFrames
             'code' => $code,
             'error' => match (true) {
                 // Stopped before it finished: a put, describe or remove may have happened.
-                $code === 'timeout' => 'The machine\'s secret command was stopped before it finished, so the result is unknown: list the secrets again before retrying.',
+                $code === 'timeout' => 'The machine\'s secret store did not finish in time, so the result is unknown: list the secrets again before retrying.',
                 is_string($error) && $error !== '' && mb_check_encoding($error, 'UTF-8') => mb_substr($error, 0, 500),
                 default => 'The machine could not do this.',
             },

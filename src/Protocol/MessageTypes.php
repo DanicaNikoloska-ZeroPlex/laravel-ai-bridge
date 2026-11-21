@@ -304,7 +304,7 @@ final class MessageTypes
 
     /*
      * Secrets on the machine (`hello.machine_secrets`, only from a bridge whose operator
-     * named a secret command). The server manages the machine's secret store for the
+     * passed --machine-secrets). The server manages the machine's secret store for the
      * person; a value only ever travels in, on `secret_put`. See Secrets\MachineSecrets.
      */
 

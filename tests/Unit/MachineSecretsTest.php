@@ -31,7 +31,7 @@ uses(RefreshDatabase::class);
 |--------------------------------------------------------------------------
 |
 | Off unless the machine's operator opted in: only a bridge started with
-| --secret-command announces `machine_secrets`, and only such a bridge is sent a
+| --machine-secrets announces `machine_secrets`, and only such a bridge is sent a
 | secret_* frame. A value travels in, on secret_put, and nowhere else.
 |
 */
@@ -218,6 +218,11 @@ describe('POST /api/secrets', function () {
             ->and($out->responses[0]['body']['error'])->toContain('list the secrets again');
     });
 
+    it('passes the store\'s store_unavailable on', function () {
+        expect(SecretFrames::answerOf(['ok' => false, 'code' => 'store_unavailable', 'error' => 'The secret folder is a symlink.']))
+            ->toBe(['ok' => false, 'code' => 'store_unavailable', 'error' => 'The secret folder is a symlink.']);
+    });
+
     it('turns an unknown code into failed', function () {
         expect(SecretFrames::answerOf(['ok' => false, 'code' => 'kaboom', 'error' => 'no']))->toBe(['ok' => false, 'code' => 'failed', 'error' => 'no']);
     });
@@ -269,7 +274,8 @@ describe('POST /api/secrets', function () {
         'trailing newline' => [['op' => 'remove', 'name' => "stripe\n"], 'invalid_name'],
         'dot dot' => [['op' => 'remove', 'name' => 'a..b'], 'invalid_name'],
         'path' => [['op' => 'remove', 'name' => 'a/b'], 'invalid_name'],
-        'description starting with -' => [['op' => 'describe', 'name' => 'stripe', 'description' => '--force'], 'invalid_request'],
+        'description with a NUL' => [['op' => 'describe', 'name' => 'stripe', 'description' => "a\0b"], 'invalid_request'],
+        'the index file' => [['op' => 'remove', 'name' => 'index.json'], 'invalid_name'],
         'no value' => [['op' => 'put', 'name' => 'stripe'], 'invalid_request'],
         'replace not a boolean' => [['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE, 'replace' => 'yes'], 'invalid_request'],
     ]);
@@ -292,7 +298,7 @@ describe('SecretRequest', function () {
             ->and(SecretRequest::descriptionRefusal(str_repeat('é', 1001)))->not->toBeNull()
             ->and(SecretRequest::descriptionRefusal("a\0b"))->not->toBeNull()
             ->and(SecretRequest::descriptionRefusal("\xC3\x28"))->not->toBeNull()
-            ->and(SecretRequest::descriptionRefusal('-n'))->not->toBeNull();
+            ->and(SecretRequest::descriptionRefusal('-n'))->toBeNull();
     });
 
     it('takes a UTF-8 value of 1 byte to 64 KiB, and never quotes it when refusing', function () {
@@ -335,7 +341,7 @@ describe('AiBridge::secrets()', function () {
         Http::fake();
 
         expect(AiBridge::secrets()->remove($this->connection, "stripe\n")['code'])->toBe('invalid_name')
-            ->and(AiBridge::secrets()->describe($this->connection, 'stripe', '-rf')['code'])->toBe('invalid_request')
+            ->and(AiBridge::secrets()->describe($this->connection, 'stripe', "a\0b")['code'])->toBe('invalid_request')
             ->and(AiBridge::secrets()->put($this->connection, 'stripe', "\xFF\xFE")['code'])->toBe('invalid_request');
         Http::assertNothingSent();
     });

@@ -304,7 +304,7 @@ on the connection status.
 
 The bridge manages the machine's secret store for the app: the `secret_*` frames of
 [Secrets on the machine](#secrets-on-the-machine); `revision` versions them. A bridge sends it only
-when its operator started it with `--secret-command`, so it is absent both from a bridge that
+when its operator started it with `--machine-secrets`, so it is absent both from a bridge that
 predates it and from one whose operator did not opt in. The server sends no `secret_*` frame to a
 bridge without it and answers the app `machine_secrets_unsupported`. Reported as
 `machine_secrets: true|false` on the connection status.
@@ -2085,13 +2085,14 @@ button means stay with the host.
 
 ## Secrets on the machine
 
-Off unless the machine's operator opts in. A bridge started with `--secret-command <absolute
-path>` (env `AI_BRIDGE_SECRET_COMMAND`) announces `hello.machine_secrets`, and the app may then
-manage the machine's secret store for the person: list it, add or replace a secret, change a
-description, remove one. The store is the machine's own; the bridge runs the operator's command
-(without a shell, bridge credentials stripped from its environment, stopped after 15 s) and
-passes its answer on. A value only ever travels in: on `secret_put`, then on the command's stdin.
-No frame, answer, error or log carries it back.
+Off unless the machine's operator opts in. A bridge started with `--machine-secrets` (env
+`AI_BRIDGE_MACHINE_SECRETS=1`, ai-bridge 0.46.0+) announces `hello.machine_secrets`, and the app
+may then manage the bridge's secret store on the machine for the person: list it, add or replace
+a secret, change a description, remove one. The store is built into the bridge
+(`~/.ai-bridge/secrets`: one file per secret, mode 0600 from creation, descriptions and dates in
+`index.json`); the person on the machine uses the same store with `aib secret`. A store operation
+that has not finished after 15 s is answered `timeout`. A value only ever travels in: on
+`secret_put`, then into its file. No frame, answer, error or log carries it back.
 
 ### Server → Bridge
 
@@ -2103,10 +2104,10 @@ No frame, answer, error or log carries it back.
 | `secret_remove` | `{id, name}` |
 
 - `name`: 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`, no
-  trailing newline (the package matches `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/`). The bridge checks
-  it again before its command runs.
-- `description`: UTF-8 text of at most 1000 characters (code points), no NUL, never starting with
-  `-` (the command takes it as an argument). Optional on `secret_put`.
+  trailing newline, never `index.json` (the package matches `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/`
+  and refuses `..` and `index.json`). The bridge checks it again.
+- `description`: UTF-8 text of at most 1000 characters (code points), no NUL. Optional on
+  `secret_put`; a replace without one keeps the old description. `""` on `secret_describe` clears it.
 - `value` (only `secret_put`): UTF-8 text of 1 byte to 64 KiB.
 - `replace` (only `secret_put`, revision 2): `true` to overwrite an existing secret. Absent, an
   existing name is refused with `exists`. A revision-1 bridge replaced without saying so: the
@@ -2120,11 +2121,11 @@ successful `secret_put`, revision 2) says whether an existing secret was overwri
 
 | Code | Meaning |
 |---|---|
-| `no_secret_tool` | The operator's command cannot be run |
+| `store_unavailable` | The store folder on the machine is unsafe or unreadable (a symlink, another owner, open to others); the bridge never repairs it |
 | `not_found` | No secret of that name |
 | `exists` | `secret_put` without `replace` for a name that exists |
-| `invalid_name` / `invalid_request` | The bridge or the command refused the name or the request |
-| `timeout` | The command was stopped before it finished: the result is unknown, list the secrets again before retrying |
+| `invalid_name` / `invalid_request` | The bridge refused the name or the request |
+| `timeout` | The store did not finish within the bridge's 15 s: the result is unknown, list the secrets again before retrying |
 | `failed` | Anything else (the server maps an unknown code to this) |
 
 ### The serve process and the PHP API

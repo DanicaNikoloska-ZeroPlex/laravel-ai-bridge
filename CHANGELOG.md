@@ -8,14 +8,15 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 ### Added
 
 - **Secrets on the machine (`AiBridge::secrets()`), off unless the operator opts in.** A bridge
-  started with `--secret-command` (ai-bridge 0.46.0+) announces `hello.machine_secrets`; only then
+  started with `--machine-secrets` (ai-bridge 0.46.0+) announces `hello.machine_secrets`; only then
   does the server send `secret_list`, `secret_put`, `secret_describe` and `secret_remove`, each
   answered by one `secret_result`. Any other bridge is answered `machine_secrets_unsupported`
-  without a frame being sent. `list()`, `put()` (with `replace`), `describe()`, `remove()` and
+  without a frame being sent. The bridge keeps the secrets in its own store on the machine
+  (`~/.ai-bridge/secrets`, one 0600 file per secret); a value goes in and never comes out. `list()`, `put()` (with `replace`), `describe()`, `remove()` and
   `supported()`, through the serve process's `POST /api/secrets`. An existing name is refused with
   `exists` unless `replace: true`, which a revision-1 bridge is never sent (`replace_unsupported`).
-  Names follow `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/` and never contain `..`; descriptions are UTF-8,
-  at most 1000 characters and never start with `-`; values are UTF-8 and at most 64 KiB; all
+  Names follow `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/`, never contain `..` and are never `index.json`; descriptions are UTF-8,
+  at most 1000 characters with no NUL; values are UTF-8 and at most 64 KiB; all
   checked before anything is sent. A write whose outcome cannot be known (the machine's `timeout`,
   the serve process's timeout, a drop after sending, an unreachable serve process) carries
   `result_unknown: true`: list the secrets again before retrying. The value travels as JSON from

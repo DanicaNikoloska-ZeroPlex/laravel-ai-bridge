@@ -16,10 +16,10 @@ use Tetrix\AiBridge\Upstreams\UpstreamClient;
  * The secret store on a person's machine, managed through its bridge: list, put, describe and
  * remove (PROTOCOL.md, "Secrets on the machine"). Reached as `AiBridge::secrets()`.
  *
- * Off unless the machine's operator started the bridge with `--secret-command`: only then does
+ * Off unless the machine's operator started the bridge with `--machine-secrets`: only then does
  * its hello carry `machine_secrets`, and a bridge without it is never sent a `secret_*` frame
- * (every call answers `machine_secrets_unsupported`). The machine's own command keeps the
- * secrets; the bridge only runs it.
+ * (every call answers `machine_secrets_unsupported`). The bridge keeps the secrets in its own
+ * store on the machine (`~/.ai-bridge/secrets`).
  *
  * A value goes in and never comes out: nothing here returns, logs or stores one. It travels as
  * JSON from this process to the serve process (POST /api/secrets) and from there in the
@@ -27,7 +27,7 @@ use Tetrix\AiBridge\Upstreams\UpstreamClient;
  * `/api/secrets` from HTTP recorders such as Telescope.
  *
  * Every method answers an array `{ok: bool, ...}` and never throws for a refusal. On failure
- * `code` is the machine's (`no_secret_tool`, `not_found`, `invalid_name`, `invalid_request`,
+ * `code` is the machine's (`store_unavailable`, `not_found`, `invalid_name`, `invalid_request`,
  * `exists`, `timeout`, `failed`) or one decided on the way (`machine_secrets_unsupported`,
  * `replace_unsupported`, `not_connected`, `unreachable`, `send_failed`). For a put, describe
  * or remove whose outcome cannot be known (`timeout`, `unreachable`, a bridge that dropped
