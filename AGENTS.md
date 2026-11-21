@@ -32,6 +32,8 @@ docker run --rm -u $(id -u):$(id -g) -v $PWD:/app -w /app --entrypoint php compo
 - Before sending a frame newer than the protocol baseline, check the bridge announced the matching
   `hello` field (`mcp_apps`, `mcp_upstream_auth`, `HELLO_CAPABILITIES`, `bridgeSupports()`).
   New wire fields are additive and do not bump the protocol version (0001).
+- A `secret_*` frame goes only to a bridge that announced `machine_secrets` (its operator opted in);
+  a secret's value is never returned, logged or put in an error (0011).
 - The web process never holds a WebSocket: it reaches the `ai-bridge:serve` process through that
   process's internal HTTP API (`/api/*` in `src/Server/BridgeWebSocketServer.php`). Anything the
   serve process writes for the web process to read goes through Redis or a shared cache store.
@@ -66,5 +68,6 @@ docker run --rm -u $(id -u):$(id -g) -v $PWD:/app -w /app --entrypoint php compo
 - 0008 A view's `mcp_request` is pinned to its server via `tool_call_id`.
 - 0009 CSRF enforced by the package on state-changing upstream routes; `tool_call_id` required on the route.
 - 0010 The repository names no downstream project (CI: `scripts/check-names.py`); history is kept, `.mailmap` maps it.
+- 0011 Machine secrets only for a bridge whose operator opted in (`hello.machine_secrets`); a value only travels in; the prompt cap is negotiated by `bridge_prompt_max_bytes`.
 
 Full records: [docs/decisions/](docs/decisions/README.md).

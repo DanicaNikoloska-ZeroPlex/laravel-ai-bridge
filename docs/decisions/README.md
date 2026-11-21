@@ -17,3 +17,4 @@ Accepted records are binding; see [AGENTS.md](../../AGENTS.md) for the one-line 
 | [0008](0008-mcp-request-pinned-by-tool-call-id.md) | A view's mcp_request is pinned to its server via tool_call_id | accepted | 2026-10-16 |
 | [0009](0009-csrf-on-upstream-routes.md) | CSRF enforced by the package on state-changing upstream routes; tool_call_id required on the browser route (supersedes 0008 in part) | accepted | 2026-10-16 |
 | [0010](0010-the-repository-names-no-downstream-project.md) | The repository names no downstream project; history is kept and mapped | accepted | 2026-11-21 |
+| [0011](0011-machine-secrets-only-with-operator-opt-in.md) | Machine secrets only for a bridge whose operator opted in; the prompt cap negotiated by its own field | accepted | 2026-11-21 |

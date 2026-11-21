@@ -108,6 +108,13 @@ class MessageHandler
         return $this->upstreamFrames ??= new \Tetrix\AiBridge\Upstreams\UpstreamFrames($this->connectionManager);
     }
 
+    private ?\Tetrix\AiBridge\Secrets\SecretFrames $secretFrames = null;
+
+    private function secretFrames(): \Tetrix\AiBridge\Secrets\SecretFrames
+    {
+        return $this->secretFrames ??= new \Tetrix\AiBridge\Secrets\SecretFrames($this->connectionManager);
+    }
+
     /** Where `upload_done` and `file_read_result` go. Set by the serve process. */
     private ?\Tetrix\AiBridge\Transfers\TransferHub $transferHub = null;
 
@@ -227,6 +234,7 @@ class MessageHandler
             MessageTypes::UPSTREAM_STATUS => $this->upstreamFrames()->status($connectionId, $message),
             MessageTypes::UPSTREAM_AUTH_REQUIRED => $this->upstreamFrames()->authRequired($connectionId, $message),
             MessageTypes::UPSTREAM_AUTH_RESULT => $this->upstreamFrames()->authResult($connectionId, $message),
+            MessageTypes::SECRET_RESULT => $this->secretFrames()->result($connectionId, $message),
             MessageTypes::STREAM => $this->handleStreamEnvelope($connectionId, $message),
             MessageTypes::TOOL_CALL => $this->handleToolCall($connectionId, $message),
             MessageTypes::ERROR => $this->handleError($connectionId, $message),
@@ -648,12 +656,17 @@ class MessageHandler
      * `{spec, revision}`, or null: absent, or not an object naming a spec.
      * `mcp_upstream_auth` is `{revision}` when the bridge implements OAuth sign-in to its
      * upstream MCP servers (the `upstream_auth_*` frames), or null.
+     * `machine_secrets` is `{revision}` when the bridge manages the machine's secret store for
+     * the app (the `secret_*` frames; only when its operator passed --machine-secrets), or null.
+     * `bridge_prompt_max_bytes` is the largest `bridge_prompt.text` the bridge takes, in bytes,
+     * when it says so (a positive integer), or null: then it takes 8 KB (see
+     * AiRequestPayload::bridgePromptCap()).
      *
      * Every field is type-checked, because this runs in the serve process's
      * event loop and a TypeError there drops every connected bridge.
      *
      * @param  array<string, mixed>  $message
-     * @return array{bridge_version: string|null, protocol_version: string|null, attachment_limits: array<string, int>|null, capabilities: list<string>, self_update: bool, mcp_apps: array{spec: string, revision: int|null}|null, mcp_upstream_auth: array{revision: int|null}|null, effort_levels: list<string>}
+     * @return array{bridge_version: string|null, protocol_version: string|null, attachment_limits: array<string, int>|null, capabilities: list<string>, self_update: bool, mcp_apps: array{spec: string, revision: int|null}|null, mcp_upstream_auth: array{revision: int|null}|null, machine_secrets: array{revision: int|null}|null, bridge_prompt_max_bytes: int|null, effort_levels: list<string>}
      */
     public static function bridgeInfoFromHello(array $message): array
     {
@@ -699,17 +712,21 @@ class MessageHandler
             'self_update' => ($message['self_update'] ?? null) === true,
             'effort_levels' => self::effortLevelsFromHello($message['effort_levels'] ?? null),
             'mcp_apps' => self::mcpAppsOf($message['mcp_apps'] ?? null),
-            'mcp_upstream_auth' => self::mcpUpstreamAuthOf($message['mcp_upstream_auth'] ?? null),
+            'mcp_upstream_auth' => self::revisionFieldOf($message['mcp_upstream_auth'] ?? null),
+            'machine_secrets' => self::revisionFieldOf($message['machine_secrets'] ?? null),
+            'bridge_prompt_max_bytes' => is_int($message['bridge_prompt_max_bytes'] ?? null) && $message['bridge_prompt_max_bytes'] > 0
+                ? $message['bridge_prompt_max_bytes'] : null,
         ];
     }
 
     /**
-     * The hello's `mcp_upstream_auth` reduced to `{revision}`, or null when it is not an
-     * object (an older bridge sends none, and must not be sent the upstream_auth_* frames).
+     * A hello's `{revision}` field (`mcp_upstream_auth`, `machine_secrets`) reduced to
+     * `{revision}`, or null when it is not an object: a bridge that sends none must not be sent
+     * the frames it stands for.
      *
      * @return array{revision: int|null}|null
      */
-    private static function mcpUpstreamAuthOf(mixed $value): ?array
+    private static function revisionFieldOf(mixed $value): ?array
     {
         if (! is_array($value) || array_is_list($value) && $value !== []) {
             return null;

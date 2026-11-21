@@ -1320,6 +1320,56 @@ Two things to get right:
   The callback URL is sent to bridges in `welcome` and registered with the authorization server,
   character for character. `AI_BRIDGE_UPSTREAM_OAUTH=false` switches the route and the URL off.
 
+### Secrets on the machine (off unless the operator opts in)
+
+`AiBridge::secrets()` manages the secret store on a person's machine through its bridge: list
+the secrets, add or replace one, change a description, remove one. It works only with a bridge
+whose operator started it with `--machine-secrets` (ai-bridge 0.46.0+): only such a bridge
+announces `machine_secrets` at hello, and every other bridge is never sent a `secret_*` frame (the
+answer is `machine_secrets_unsupported`). The bridge keeps the secrets in its own store on the
+machine (`~/.ai-bridge/secrets`, one file per secret, readable only by the machine's user), which
+the person there also uses with `aib secret`. A value goes in and never comes out.
+
+```php
+$secrets = AiBridge::secrets();
+
+if ($secrets->supported($connection)) {
+    $secrets->list($connection);
+    // ['ok' => true, 'secrets' => [['name' => 'stripe', 'description' => 'Live key', 'updated_at' => '2026-11-20T10:00:00Z']]]
+
+    $secrets->put($connection, 'stripe', $value, 'Live key');          // ['ok' => false, 'code' => 'exists', ...] if it exists
+    $secrets->put($connection, 'stripe', $value, replace: true);       // ['ok' => true, 'replaced' => true]
+    $secrets->describe($connection, 'stripe', 'Rotated in November');
+    $secrets->remove($connection, 'stripe');
+}
+```
+
+- Every call answers `['ok' => bool, ...]` and never throws for a refusal. A failure's `code` is
+  the machine's (`store_unavailable`, `not_found`, `invalid_name`, `invalid_request`, `exists`,
+  `timeout`, `failed`) or one decided on the way (`machine_secrets_unsupported`,
+  `machine_secrets_outdated`, `not_connected`, `unreachable`, `send_failed`).
+- A put, describe or remove that may or may not have happened (the machine's store did not
+  answer in time, nobody answered in time, the bridge dropped after it was sent) carries
+  `result_unknown: true`: list the secrets again before retrying.
+- Names are 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..` or
+  `index.json` (in any case); descriptions are UTF-8, at most 1000 characters, with no control
+  characters but tab and newline; values are UTF-8, at most 64 KiB. Checked here before anything
+  is sent, and again by the bridge.
+- A bridge below revision 2 (an unreleased draft) is sent nothing: `machine_secrets_outdated`.
+- **The value travels as JSON** from your process to the `ai-bridge:serve` process
+  (`POST /api/secrets`), then to the bridge, through Laravel's HTTP client. Keep
+  `AI_BRIDGE_RELAY_URL` local or https. Anything that records outgoing client requests sees the
+  body: with Telescope, call `Telescope::hideRequestParameters(['value'])` in your
+  `TelescopeServiceProvider`, and keep other outgoing-request loggers away from `/api/secrets`.
+  The package never logs it.
+- `supported()` reads what the bridge announced when it last connected, so it can be true while
+  the machine is off: check the connection's `connected` too before offering the feature.
+- `ConnectionStatus::for()` and `GET /ai-bridge/connections` report `machine_secrets`.
+  `ai-bridge.machine_secrets.timeout` (`AI_BRIDGE_MACHINE_SECRETS_TIMEOUT`, 20 s) is how long
+  the serve process waits.
+
+See [PROTOCOL.md](PROTOCOL.md#secrets-on-the-machine) and decision 0011.
+
 ### Listening for Tool Calls
 
 ```php

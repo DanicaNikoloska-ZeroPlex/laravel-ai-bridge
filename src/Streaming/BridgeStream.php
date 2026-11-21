@@ -204,6 +204,13 @@ class BridgeStream implements StreamableProvider
         // Try direct WebSocket send first (works in long-running processes like
         // the bridge server itself, Octane, or Swoole where connections are in-memory).
         if ($this->connectionManager->hasConnection($this->userId)) {
+            $promptRefusal = AiRequestPayload::bridgePromptRefusal($payload, $this->connectionManager->getBridgeInfo($this->userId));
+            if ($promptRefusal !== null) {
+                $this->streamHandler->dispatchError(AiRequestPayload::BRIDGE_PROMPT_TOO_LARGE, $promptRefusal);
+
+                return;
+            }
+
             $sent = $this->connectionManager->sendToUser($this->userId, $payload);
 
             if (! $sent) {
@@ -372,7 +379,9 @@ class BridgeStream implements StreamableProvider
 
                 $this->streamHandler->dispatchError(
                     $error,
-                    'Bridge server returned HTTP '.$response->status().'. Check server logs for details.'
+                    $error === AiRequestPayload::BRIDGE_PROMPT_TOO_LARGE && is_string($body['message'] ?? null)
+                        ? $body['message']
+                        : 'Bridge server returned HTTP '.$response->status().'. Check server logs for details.'
                 );
 
                 return;

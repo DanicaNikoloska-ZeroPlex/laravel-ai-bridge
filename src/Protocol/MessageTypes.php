@@ -302,6 +302,27 @@ final class MessageTypes
     /** Server → bridge: forget this upstream's tokens on this bridge. */
     public const UPSTREAM_AUTH_FORGET = 'upstream_auth_forget';
 
+    /*
+     * Secrets on the machine (`hello.machine_secrets`, only from a bridge whose operator
+     * passed --machine-secrets). The server manages the machine's secret store for the
+     * person; a value only ever travels in, on `secret_put`. See Secrets\MachineSecrets.
+     */
+
+    /** Server → bridge: list the machine's secrets (names, descriptions, when updated). */
+    public const SECRET_LIST = 'secret_list';
+
+    /** Server → bridge: add a secret, or replace one with `replace: true` (revision 2). */
+    public const SECRET_PUT = 'secret_put';
+
+    /** Server → bridge: change a secret's description. */
+    public const SECRET_DESCRIBE = 'secret_describe';
+
+    /** Server → bridge: remove a secret. */
+    public const SECRET_REMOVE = 'secret_remove';
+
+    /** Bridge → server: exactly one per `secret_*` frame, same `id`. Never carries a value. */
+    public const SECRET_RESULT = 'secret_result';
+
     /** Stream event: the entire AI response is complete. */
     public const DONE = 'done';
 
@@ -376,6 +397,11 @@ final class MessageTypes
             self::UPSTREAM_AUTH_CODE,
             self::UPSTREAM_AUTH_RESULT,
             self::UPSTREAM_AUTH_FORGET,
+            self::SECRET_LIST,
+            self::SECRET_PUT,
+            self::SECRET_DESCRIBE,
+            self::SECRET_REMOVE,
+            self::SECRET_RESULT,
             self::DONE,
             self::ERROR,
             self::CANCEL,
@@ -422,6 +448,7 @@ final class MessageTypes
             self::UPSTREAM_STATUS,
             self::UPSTREAM_AUTH_REQUIRED,
             self::UPSTREAM_AUTH_RESULT,
+            self::SECRET_RESULT,
             self::STREAM,
             self::TOOL_CALL,
             self::ERROR,
@@ -467,6 +494,10 @@ final class MessageTypes
             self::UPSTREAM_AUTH_START,
             self::UPSTREAM_AUTH_CODE,
             self::UPSTREAM_AUTH_FORGET,
+            self::SECRET_LIST,
+            self::SECRET_PUT,
+            self::SECRET_DESCRIBE,
+            self::SECRET_REMOVE,
             self::CANCEL,
         ];
     }

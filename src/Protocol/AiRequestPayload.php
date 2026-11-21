@@ -25,8 +25,18 @@ final class AiRequestPayload
     /** The `bridge_prompt.mode` values the bridge accepts (0.12.0+). */
     public const BRIDGE_PROMPT_MODES = ['default', 'off', 'append', 'replace'];
 
-    /** The bridge's cap on `bridge_prompt.text`, in bytes (MAX_BRIDGE_PROMPT_BYTES). */
-    public const MAX_BRIDGE_PROMPT_BYTES = 8192;
+    /**
+     * The largest `bridge_prompt.text` sent to any bridge, in bytes: what a bridge that announces
+     * `bridge_prompt_max_bytes` of at least this takes. build() checks against this; the bridge a
+     * turn goes to may take less (bridgePromptCap()).
+     */
+    public const MAX_BRIDGE_PROMPT_BYTES = 16384;
+
+    /** What a bridge takes that does not announce `bridge_prompt_max_bytes` (ai-bridge before it). */
+    public const DEFAULT_BRIDGE_PROMPT_BYTES = 8192;
+
+    /** The error code of a turn refused because its `bridge_prompt.text` is over its bridge's cap. */
+    public const BRIDGE_PROMPT_TOO_LARGE = 'bridge_prompt_too_large';
 
     /** The longest `options.effort` sent; a level is a short word (`low` … `max`). */
     public const MAX_EFFORT_LENGTH = 32;
@@ -208,6 +218,44 @@ final class AiRequestPayload
         }
 
         return $hasText ? ['mode' => $mode, 'text' => $text] : ['mode' => $mode];
+    }
+
+    /**
+     * The largest `bridge_prompt.text` the bridge described by `$bridgeInfo` takes, in bytes
+     * (see MessageHandler::bridgeInfoFromHello()): MAX_BRIDGE_PROMPT_BYTES when its hello said
+     * `bridge_prompt_max_bytes` of at least that, else DEFAULT_BRIDGE_PROMPT_BYTES. Negotiated
+     * by its own field, so it does not depend on any other capability of the bridge.
+     *
+     * @param  array<string, mixed>  $bridgeInfo
+     */
+    public static function bridgePromptCap(array $bridgeInfo): int
+    {
+        $announced = $bridgeInfo['bridge_prompt_max_bytes'] ?? null;
+
+        return is_int($announced) && $announced >= self::MAX_BRIDGE_PROMPT_BYTES
+            ? self::MAX_BRIDGE_PROMPT_BYTES
+            : self::DEFAULT_BRIDGE_PROMPT_BYTES;
+    }
+
+    /**
+     * Why a built payload must not go to the bridge described by `$bridgeInfo`, or null when
+     * it may: a `bridge_prompt.text` over that bridge's cap, which the bridge would refuse
+     * with `bridge_prompt_invalid` only after the turn had started.
+     *
+     * @param  array<string, mixed>  $payload  A payload built by build().
+     * @param  array<string, mixed>  $bridgeInfo
+     */
+    public static function bridgePromptRefusal(array $payload, array $bridgeInfo): ?string
+    {
+        $text = $payload['bridge_prompt']['text'] ?? null;
+        $cap = self::bridgePromptCap($bridgeInfo);
+
+        if (is_string($text) && strlen($text) > $cap) {
+            return 'bridge_prompt.text is '.strlen($text).' bytes; the bridge on this machine takes at most '.$cap
+                .' (it takes '.self::MAX_BRIDGE_PROMPT_BYTES.' once it announces bridge_prompt_max_bytes; update it).';
+        }
+
+        return null;
     }
 
     /**

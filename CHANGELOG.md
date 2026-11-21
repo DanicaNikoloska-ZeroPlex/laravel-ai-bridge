@@ -5,8 +5,44 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
 ## Unreleased — to be released as 0.27.0
 
+### Added
+
+- **Secrets on the machine (`AiBridge::secrets()`), off unless the operator opts in.** A bridge
+  started with `--machine-secrets` (ai-bridge 0.46.0+) announces `hello.machine_secrets`; only then
+  does the server send `secret_list`, `secret_put`, `secret_describe` and `secret_remove`, each
+  answered by one `secret_result`. Any other bridge is answered `machine_secrets_unsupported`
+  without a frame being sent. The bridge keeps the secrets in its own store on the machine
+  (`~/.ai-bridge/secrets`, one 0600 file per secret); a value goes in and never comes out.
+  `list()`, `put()` (with `replace`), `describe()`, `remove()` and `supported()`, through the
+  serve process's `POST /api/secrets`. An existing name is refused with `exists` unless
+  `replace: true`; a bridge below revision 2 (an unreleased draft) is sent nothing
+  (`machine_secrets_outdated`). Names follow `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/`, never contain
+  `..` and are never `index.json`; descriptions are UTF-8, at most 1000 characters, with no
+  control characters but tab and newline; values are UTF-8 and at most 64 KiB; all checked before
+  anything is sent. A write whose outcome cannot be known (the machine's `timeout`,
+  the serve process's timeout, a drop after sending, an unreachable serve process) carries
+  `result_unknown: true`: list the secrets again before retrying. The value travels as JSON from
+  the app to the serve process through Laravel's HTTP client: keep `AI_BRIDGE_RELAY_URL` local or
+  https, and with Telescope call `Telescope::hideRequestParameters(['value'])` (its client request
+  watcher records the body). `ConnectionStatus` and
+  `GET /ai-bridge/connections` report `machine_secrets`. Config
+  `ai-bridge.machine_secrets.timeout` (20 s). Same frames as the earlier draft, so a host built on
+  them keeps working. See decision 0011.
+- **`bridge_prompt.text` up to 16 KB, negotiated by its own hello field.** A bridge that announces
+  `bridge_prompt_max_bytes` of at least 16384 takes up to 16 KB; any other still takes 8 KB.
+  `AiRequestPayload::build()` refuses more than 16 KB, and a text over the cap of the bridge a turn
+  goes to is refused before sending, with `bridge_prompt_too_large` (400 from `/api/request`, or a
+  stream error). `ConnectionStatus` reports the cap as `bridge_prompt_max_bytes`.
+  `AiRequestPayload::bridgePromptCap()` / `bridgePromptRefusal()`.
+
+Additive; protocol stays 0.1.
+
 ### Changed
 
+- **`AiRequestPayload::MAX_BRIDGE_PROMPT_BYTES` is now 16384** (was 8192): the largest text any
+  bridge takes. What one bridge takes is `AiRequestPayload::bridgePromptCap($bridgeInfo)` (8192,
+  `DEFAULT_BRIDGE_PROMPT_BYTES`, for a bridge that does not announce more); a host that trimmed
+  its prompt to the constant should trim to that instead.
 - **Neutral examples and records.** Docs, comments, tests and decision records 0003-0006 use neutral
   names; no behaviour change. CI now fails on another organisation's product, people or ticket
   numbers in any file (`scripts/check-names.py`), and `.mailmap` maps earlier commit identities.
