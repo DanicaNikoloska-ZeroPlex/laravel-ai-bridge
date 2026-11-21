@@ -283,7 +283,7 @@ somewhere its operator did not permit:
 
 ```bash
 npx @tetrixdev/ai-bridge --server=wss://yourapp.com/ai-bridge/ws --token=<JWT> \
-  --allow-dir ~/zp-studio=Studio
+  --allow-dir ~/projects/acme-app=Acme
 ```
 
 **In your app**, set the CLI isolation posture and give the conversation a
@@ -298,7 +298,7 @@ $conversation = Conversation::create([
     'mode' => 'bridge',
     'provider' => 'claude',
     // One of the paths the bridge advertised — see below.
-    'working_dir' => '/Users/jasper/zp-studio/zeroplex-studio',
+    'working_dir' => '/home/me/projects/acme-app',
 ]);
 ```
 
@@ -308,7 +308,7 @@ rather than asking anyone to type an absolute path:
 
 ```php
 $status = app(ConnectionStatus::class)->for($connection);
-$status['workspaces'];  // [['path' => '/Users/jasper/zp-studio', 'label' => 'Studio'], ...]
+$status['workspaces'];  // [['path' => '/home/me/projects/acme-app', 'label' => 'Acme'], ...]
 ```
 
 The list is empty for a bridge whose operator passed no `--allow-dir`, and for
@@ -330,7 +330,7 @@ before the developer has picked a workspace:
 
 ```php
 POST /ai-bridge/conversations/{id}/stream
-{ "message": "run the tests", "working_dir": "/Users/jasper/zp-studio/zeroplex-studio" }
+{ "message": "run the tests", "working_dir": "/home/me/projects/acme-app" }
 ```
 
 That works on the **first** turn only. Afterwards, naming a different directory
@@ -1131,7 +1131,7 @@ newer on the machine and a CLI that reports its call ids (Claude Code); anywhere
 still runs, it just shows no view. See [PROTOCOL.md](PROTOCOL.md#tools-with-a-view-mcp-apps).
 
 **What happens when the person presses a button in a card is not this package's concern.** The
-host (the chat, `zeroplex/ai`) handles it through its own doorway, behind the person's sign-in;
+host (the chat application) handles it through its own doorway, behind the person's sign-in;
 it never becomes a tool call and never travels over the bridge. This package only makes the card
 appear: it declares the view, serves its HTML and hands the host the tool's result.
 
@@ -1141,7 +1141,7 @@ appear: it declares the view, serves its HTML and hands the host the tool's resu
 use Tetrix\AiBridge\Facades\AiBridge;
 
 AiBridge::views()->register(
-    uri: 'ui://studio/grant-request',
+    uri: 'ui://app/grant-request',
     html: fn () => view('grants.card')->render(),
     csp: [],                                   // MCP Apps `_meta.ui.csp`; empty = nothing external
 );
@@ -1158,7 +1158,7 @@ class ShowGrantRequestTool extends AbstractTool
 {
     public function name(): string { return 'show_grant_request'; }
     public function description(): string { return 'Show the person a grant request to confirm'; }
-    public function view(): ?string { return 'ui://studio/grant-request'; }   // null = no view (default)
+    public function view(): ?string { return 'ui://app/grant-request'; }   // null = no view (default)
 
     protected function defineParameters(): array { /* grant_id */ }
 

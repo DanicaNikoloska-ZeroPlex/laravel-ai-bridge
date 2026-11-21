@@ -5,11 +5,11 @@ supersedes:
 superseded_by:
 revisit_when:
 ---
-# After merging the ZeroPlex fork's 0.16, numbering continues at 0.17.0
+# After merging a fork's 0.16 back, numbering continues at 0.17.0
 
 ## Context
 
-The ZeroPlexBV fork published 0.16.0-RC1, 0.16.0 and 0.16.1 while its changes waited to go
+A downstream fork published 0.16.0-RC1, 0.16.0 and 0.16.1 while its changes waited to go
 upstream. Upstream had its own 0.16.0 (the desired bridge version, PR #38). PR #39 merged the fork
 back with its history and authorship intact.
 
@@ -23,3 +23,8 @@ own versions, marked as published from the fork.
 
 - `0.16.0` means different code depending on where it was installed from; anyone on either line
   moves to 0.17.0 or later.
+
+## Note
+
+The wording of this record was anonymised on 2026-11-21. The decision and its reasoning
+are unchanged.

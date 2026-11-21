@@ -138,7 +138,7 @@ describe('accepting a file from the assistant', function () {
         app(AiBridgeManager::class)->storeAttachmentUsing(function (UploadedFile $file, $userId) use (&$seen) {
             $seen = [$file->getClientOriginalName(), $userId];
 
-            return ['id' => 'att_new', 'url' => 'https://studio.test/a/att_new'];
+            return ['id' => 'att_new', 'url' => 'https://app.test/a/att_new'];
         });
 
         $request = bridgeRequest('POST', '/ai-bridge/attachments', [], 'key-3');
@@ -156,7 +156,7 @@ describe('accepting a file from the assistant', function () {
         // model. None of that is the bridge's business.
         app(AiBridgeManager::class)->storeAttachmentUsing(fn () => [
             'id' => 'att_new',
-            'url' => 'https://studio.test/a/att_new',
+            'url' => 'https://app.test/a/att_new',
             'absolute_path' => '/var/www/storage/app/private/att_new.md',
             'disk' => 'local',
         ]);

@@ -123,7 +123,7 @@ class StreamHandler
      * The largest view a tool call may carry, as its JSON (256 KB), whether the server built
      * it or a bridge sent it for an upstream tool.
      *
-     * #11494: the chat refuses to draw a larger `ui` (McpApps::MAX_UI_BYTES in zeroplex/ai), so
+     * A host chat may refuse to draw a larger `ui`, so
      * keeping one only costs memory for a card nobody will see.
      */
     public const MAX_TOOL_VIEW_BYTES = 262144;
@@ -1264,7 +1264,7 @@ class StreamHandler
                 $event->data['tool_name'],
                 $event->data['parameters'] ?? [],
                 $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
-                // #11493: a raw tool_call event keeps the CLI's own call id too.
+                // A raw tool_call event keeps the CLI's own call id too.
                 is_string($event->data['provider_tool_call_id'] ?? null) ? $event->data['provider_tool_call_id'] : null,
             ),
             MessageTypes::TOOL_RESULT => $this->receiveToolResult($event->data),

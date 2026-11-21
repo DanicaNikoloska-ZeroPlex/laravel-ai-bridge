@@ -286,7 +286,7 @@ test('session_lost recovery carries the conversation working directory', functio
         'mode' => 'bridge',
         'provider' => 'claude',
         'cli_session_id' => 'dead-sess',
-        'working_dir' => '/repos/studio',
+        'working_dir' => '/repos/acme-app',
     ]);
     $conversation->appendMessage(Message::ROLE_USER, 'run the tests');
 
@@ -307,7 +307,7 @@ test('session_lost recovery carries the conversation working directory', functio
     ));
 
     expect($sent)->toHaveCount(1)
-        ->and($sent[0]['working_dir'])->toBe('/repos/studio')
+        ->and($sent[0]['working_dir'])->toBe('/repos/acme-app')
         ->and($sent[0]['cli_session_id'])->toBeNull();
 });
 
@@ -342,7 +342,7 @@ test('session_lost re-issue keeps the relayed turn\'s bridge_prompt and open inp
         ->and($sent[0]['options']['accepts_input'])->toBeTrue();
 });
 
-// --- D09710: a re-issued turn may number its frames from 1 again (#14262) ---
+// --- A re-issued turn may number its frames from 1 again ---
 
 test('after a numbered session_lost error, the re-issued turn\'s frames from seq 1 are stored, not dropped as seen', function () {
     config(['ai-bridge.websocket.stream_ack_interval' => 0]);
@@ -385,7 +385,7 @@ test('after a numbered session_lost error, the re-issued turn\'s frames from seq
         ->and($acks)->toBe([1, 2, 1, 1, 2]);
 });
 
-// --- D09710 review follow-up: a re-sent session_lost of the old run is told apart (point 3) ---
+// --- Short drops: a re-sent session_lost of the old run is told apart ---
 
 /**
  * A reliable bridge's numbered turn req-1 on a conversation with a dead session, and what the

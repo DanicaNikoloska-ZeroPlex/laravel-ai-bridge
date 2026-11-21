@@ -89,7 +89,7 @@ class MessageHandler
     /**
      * The largest view a tool call may keep in the stream store, as its JSON (256 KB).
      *
-     * #11494: the chat refuses to draw a larger `ui` (McpApps::MAX_UI_BYTES in zeroplex/ai), so
+     * A host chat may refuse to draw a larger `ui`, so
      * storing one only costs the shared store memory for a card nobody will see.
      */
     private const MAX_TOOL_VIEW_BYTES = StreamHandler::MAX_TOOL_VIEW_BYTES;
@@ -1767,7 +1767,7 @@ class MessageHandler
                 'request_id' => $requestId,
             ]);
 
-            // The turn is over here: a reliable bridge may let go of its frames (#14273).
+            // The turn is over here: a reliable bridge may let go of its frames.
             if ($sendClosedAck && $this->connectionManager->bridgeSupports($userId, 'reliable_delivery')) {
                 $this->sendClosedAck($userId, $requestId, $this->connectionManager->lastStoredSeq($requestId));
             }
@@ -1962,7 +1962,7 @@ class MessageHandler
                 }
 
                 $view = $this->toolRegistry->get($toolName)->view;
-                // #11497: without the CLI's own call id there is nothing to join the view to, so
+                // Without the CLI's own call id there is nothing to join the view to, so
                 // the call is shown without its card. Expected (Codex, an older bridge), but say so,
                 // so an operator can tell it from "this tool has no view".
                 if ($view !== null && $providerCallId === null) {
@@ -1972,7 +1972,7 @@ class MessageHandler
                         'view' => $view,
                     ]);
                 }
-                // #11489: a view tool whose handle() returns a plain value still gets a card, but one
+                // A view tool whose handle() returns a plain value still gets a card, but one
                 // with only that value as text and no structured content. Easy to miss, so say so.
                 if ($view !== null && ! $result instanceof ToolResult) {
                     Log::debug('AI Bridge: a tool with a view returned no ToolResult, its view gets text only', [
@@ -2093,7 +2093,7 @@ class MessageHandler
             if ($encoded === false) {
                 throw new \UnexpectedValueException('the view result is not JSON-serializable: '.json_last_error_msg());
             }
-            // #11494: a view the host will never draw is not written to the shared stream store.
+            // A view the host will never draw is not written to the shared stream store.
             if (strlen($encoded) > self::MAX_TOOL_VIEW_BYTES) {
                 throw new \LengthException('the view result is '.strlen($encoded).' bytes, over the '.self::MAX_TOOL_VIEW_BYTES.' a view may take');
             }

@@ -171,7 +171,7 @@ test('the resumable session handle never reaches the browser', function () {
         'mode' => 'bridge',
         'provider' => 'claude',
         'cli_session_id' => 'SECRET-SESSION-abc',
-        'working_dir' => '/repos/studio',
+        'working_dir' => '/repos/acme-app',
     ]);
 
     $json = $conversation->toArray();
@@ -179,7 +179,7 @@ test('the resumable session handle never reaches the browser', function () {
     expect($json)->not->toHaveKey('cli_session_id')
         // The directory the operator chose is theirs to see; the workspace
         // picker reads it back. Only the handle is withheld.
-        ->and($json['working_dir'])->toBe('/repos/studio');
+        ->and($json['working_dir'])->toBe('/repos/acme-app');
 
     expect(json_encode($conversation))->not->toContain('SECRET-SESSION-abc');
 });

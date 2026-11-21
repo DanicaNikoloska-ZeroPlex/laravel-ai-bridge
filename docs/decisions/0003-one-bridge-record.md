@@ -9,11 +9,11 @@ revisit_when:
 
 ## Context
 
-Merging the ZeroPlex fork (PR #39) met upstream's PR #38 head-on: both recorded `bridge_version`
+Merging a downstream fork back (PR #39) met upstream's PR #38 head-on: both recorded `bridge_version`
 from `hello`. PR #38 had kept `bridge_version` and `self_update` live only (flat keys, no
 migration), reasoning that a remembered version is what a self-update makes out of date. The fork
 kept `bridge_version` inside the `bridge` record cached in `ai_bridge_connections.last_bridge`,
-and ZeroPlex Studio relies on seeing it while a machine is off.
+and the fork's host application relies on seeing it while a machine is off.
 
 ## Decision
 
@@ -29,5 +29,10 @@ upstream: false whenever the bridge is not connected.
 
 ## Options considered
 
-- Keep PR #38's live-only `bridge_version`: rejected, because Studio shows a machine is behind
+- Keep PR #38's live-only `bridge_version`: rejected, because the fork's host application shows a machine is behind
   while it is switched off.
+
+## Note
+
+The wording of this record was anonymised on 2026-11-21. The decision and its reasoning
+are unchanged.

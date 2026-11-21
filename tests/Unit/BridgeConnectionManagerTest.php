@@ -431,7 +431,7 @@ test('disconnectUser swallows close() failures and still removes the connection'
     expect($this->manager->hasConnection('user-1'))->toBeFalse();
 });
 
-// --- D09710: a reliable_delivery bridge's turns survive a short drop ---
+// --- A reliable_delivery bridge's turns survive a short drop ---
 
 function reliableTurn(BridgeConnectionManager $manager, string $requestId, ?string &$errorCode = null): StreamHandler
 {
@@ -567,9 +567,9 @@ test('acceptSeq only judges a frame: until commitSeq it is not counted as stored
         ->and($this->manager->lastStoredSeq('req-1'))->toBe(0);
 });
 
-// --- D09710 rework: what a drop keeps, and what it does not ---
+// --- Short drops: what a drop keeps, and what it does not ---
 
-test('a reconnect that drops before its hello keeps the turns held for the earlier drop (#14258)', function () {
+test('a reconnect that drops before its hello keeps the turns held for the earlier drop', function () {
     connectReliable($this->manager, 'conn-1');
     $code = null;
     reliableTurn($this->manager, 'req-1', $code);
@@ -588,7 +588,7 @@ test('a reconnect that drops before its hello keeps the turns held for the earli
         ->and($code)->toBeNull();
 });
 
-test('a deliberate close fails a reliable bridge\'s turns at once instead of detaching them (#14259, #14278)', function (string $how) {
+test('a deliberate close fails a reliable bridge\'s turns at once instead of detaching them', function (string $how) {
     connectReliable($this->manager, 'conn-1');
     $code = null;
     reliableTurn($this->manager, 'req-1', $code);
@@ -621,7 +621,7 @@ test('a deliberate close while an earlier drop is waited out fails the detached 
         ->and($this->manager->isAwaitingReconnect('user-1'))->toBeFalse();
 });
 
-test('a turn lost after a drop says why, in plain words, per reason (#14263)', function (string $reason, string $expected) {
+test('a turn lost after a drop says why, in plain words, per reason', function (string $reason, string $expected) {
     config(['ai-bridge.websocket.reconnect_grace_seconds' => 120]);
     connectReliable($this->manager, 'conn-1');
     $handler = reliableTurn($this->manager, 'req-1');
@@ -644,7 +644,7 @@ test('a turn lost after a drop says why, in plain words, per reason (#14263)', f
     'not back in time' => [TurnLostAfterDrop::GRACE_EXPIRED, 'The connection to your machine dropped and it did not come back within 120 seconds, so the reply stopped here and the rest of it was not saved. Send your message again to continue.'],
 ]);
 
-test('the finished-turn memory keeps the newest 500 turns (#14262)', function () {
+test('the finished-turn memory keeps the newest 500 turns', function () {
     for ($i = 1; $i <= 501; $i++) {
         $this->manager->rememberFinishedRequest("req-{$i}", 'user-1', $i);
     }
@@ -670,7 +670,7 @@ function heldRig(object $test): object
     return $rig;
 }
 
-test('work for a machine on a short drop is held and sent after its next hello (#14256)', function () {
+test('work for a machine on a short drop is held and sent after its next hello', function () {
     $rig = heldRig($this);
     $this->manager->removeConnection('user-1', 'websocket_closed');
     $sentAt = [];
@@ -697,7 +697,7 @@ test('work for a machine on a short drop is held and sent after its next hello (
     expect($rig->sent)->toHaveCount(2);
 });
 
-test('a usage question and a mid-turn message already out are put again after the reconnect, not failed (#14256, #14274)', function () {
+test('a usage question and a mid-turn message already out are put again after the reconnect, not failed', function () {
     $rig = heldRig($this);
     $answers = [];
     $usageFrame = ['type' => 'usage_request', 'id' => 'u-1'];
@@ -744,7 +744,7 @@ test('an exchange already out when the machine drops fails at once; one asked du
         ->and($this->manager->hasPendingExchange('mcp:2'))->toBeTrue();
 });
 
-test('when the grace period ends without the machine, everything that waited fails, and only then (#14256)', function () {
+test('when the grace period ends without the machine, everything that waited fails, and only then', function () {
     config(['ai-bridge.websocket.reconnect_grace_seconds' => 120]);
     heldRig($this);
     $answers = [];
