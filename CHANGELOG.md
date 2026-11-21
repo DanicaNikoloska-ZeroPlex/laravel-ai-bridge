@@ -3,6 +3,15 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## Unreleased — to be released as 0.27.0
+
+### Changed
+
+- **Neutral examples and records.** Docs, comments, tests and decision records 0003-0006 use neutral
+  names; no behaviour change. CI now fails on another organisation's product, people or ticket
+  numbers in any file (`scripts/check-names.py`), and `.mailmap` maps earlier commit identities.
+  See decision 0010.
+
 ## [0.26.1] — 2026-11-19
 
 ### Fixed

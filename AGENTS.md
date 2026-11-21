@@ -17,6 +17,7 @@ docker run --rm -u $(id -u):$(id -g) -v $PWD:/app -w /app --entrypoint php compo
 docker run --rm -u $(id -u):$(id -g) -v $PWD:/app -w /app --entrypoint php composer:2 vendor/bin/pest --filter='refuses a BYOK connection'
 ```
 
+- `python3 scripts/check-names.py` (gates CI): no other organisation's product, people or ticket numbers in any file (0010).
 - The PostgreSQL migration tests skip without a PG host; CI runs them (`.github/workflows/`).
 - `resources/dist/ai-bridge-chat.js` is a hand-maintained bundle with no build step; its
   Playwright tests are manual: [tests/Browser/README.md](tests/Browser/README.md).
@@ -64,5 +65,6 @@ docker run --rm -u $(id -u):$(id -g) -v $PWD:/app -w /app --entrypoint php compo
 - 0007 Upstream OAuth sign-in is relayed through a callback route; tokens stay on the bridge.
 - 0008 A view's `mcp_request` is pinned to its server via `tool_call_id`.
 - 0009 CSRF enforced by the package on state-changing upstream routes; `tool_call_id` required on the route.
+- 0010 The repository names no downstream project (CI: `scripts/check-names.py`); history is kept, `.mailmap` maps it.
 
 Full records: [docs/decisions/](docs/decisions/README.md).

@@ -37,6 +37,5 @@ the host the tool's result (`tool_result.ui`).
 
 ## Note
 
-On 2026-11-21 the names of the fork, its owner, its people and its host application, and its
-internal ticket numbers, were taken out of this record at the repository owner's request. The
-decision and its reasoning are unchanged.
+The wording of this record was anonymised on 2026-11-21. The decision and its reasoning
+are unchanged.

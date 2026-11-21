@@ -113,3 +113,14 @@ jobs:
 
       - name: Check PHP syntax
         run: find src -name "*.php" -exec php -l {} \;
+
+  names:
+    name: No blocked names
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Decision 0010: no other organisation's product, people or ticket
+      # numbers in the files. .mailmap is the one file excluded.
+      - name: Check tracked files for blocked names and ticket numbers
+        run: python3 scripts/check-names.py
