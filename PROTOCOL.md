@@ -18,6 +18,7 @@ Specification for the WebSocket protocol between `@tetrixdev/ai-bridge` (npm, cl
 - [Streaming Events](#streaming-events)
 - [Tool Calls](#tool-calls)
 - [Upstream MCP Apps and OAuth sign-in](#upstream-mcp-apps-and-oauth-sign-in)
+- [Secrets on the machine](#secrets-on-the-machine)
 - [Heartbeat](#heartbeat)
 - [Error Handling](#error-handling)
 - [Provider Reference](#provider-reference)
@@ -135,7 +136,7 @@ A bridge that sends `capabilities.reliable_delivery: true` in `hello` keeps its 
   - a `usage_request` or `turn_input` asked during the drop is held; one already out when the connection dropped is sent again after the reconnect while its caller still waits (the bridge takes a `message_id` once, so a message is never written twice);
   - an `mcp_request`, `upstream_auth_start` or `upstream_auth_code` asked during the drop is held; one already out when the connection dropped fails at once with `not_connected`, because it may have run and is not safe to run twice;
   - a file hand-over carries on: its bytes travel on their own HTTP connection, so an upload or download in progress is not ended by the drop, and an `upload_offer`, `file_read` or `upload_sent` due during the drop is held. A transfer that fails while its frame is held (the browser went away, a clock ran out) drops that frame: the machine is never sent it, nor an `upload_abort` / `file_read_cancel` for it;
-  - a held frame goes only to a bridge that can handle it. It is sent after the reconnect only when the `hello` of the bridge that came back announced what it needs: `file_uploads` for `upload_offer` / `upload_sent`, `file_downloads` for `file_read`, `turn_input` for `turn_input`, `mcp_apps` for `mcp_request`, `mcp_upstream_auth` for a sign-in step (a `usage_request` needs nothing). When an older bridge takes the machine's place without it, the frame is dropped unsent and its caller answered at once: a transfer with 409 `unsupported`, a `turn_input` with `send_failed` (`no_answer` when it went out before the drop), an exchange with 409 `<needs>_unsupported`;
+  - a held frame goes only to a bridge that can handle it. It is sent after the reconnect only when the `hello` of the bridge that came back announced what it needs: `file_uploads` for `upload_offer` / `upload_sent`, `file_downloads` for `file_read`, `turn_input` for `turn_input`, `mcp_apps` for `mcp_request`, `mcp_upstream_auth` for a sign-in step, `machine_secrets` for a `secret_*` frame (a `usage_request` needs nothing). When an older bridge takes the machine's place without it, the frame is dropped unsent and its caller answered at once: a transfer with 409 `unsupported`, a `turn_input` with `send_failed` (`no_answer` when it went out before the drop), an exchange with 409 `<needs>_unsupported`;
   - when the grace period ends without the machine, all of it fails as it would have at the drop: usage with `not_connected`, an exchange with its `not_connected` answer, a transfer with `machine_gone`, and a `turn_input` with the new reason `connection_lost` (its turn has ended too; the caller must not count the message as delivered). A bridge without `reliable_delivery` still fails all of it at once, a `turn_input` with `no_answer`.
 
 ---
@@ -281,6 +282,32 @@ CLI's tool list and reports the CLI's own call id on every `tool_call` (see
 same `bridge` record as `bridge_version` (`last_bridge.mcp_apps`) and reports `mcp_apps: true|false`
 on the connection status. Absent means the bridge is older than 0.27.0: the server then attaches no
 view to that machine's tool results and never sends `mcp_request`.
+
+#### Additive field: `bridge_prompt_max_bytes`
+
+```json
+{ "type": "hello", "bridge_prompt_max_bytes": 16384 }
+```
+
+The largest `bridge_prompt.text` the bridge takes, in bytes. A bridge without the field takes
+8 KB. The server sends up to 16 KB only to a bridge that announces at least 16384, and refuses a
+longer text for any other bridge before the turn starts (`bridge_prompt_too_large`, see
+[`bridge_prompt`](#additive-fields-bridge_env-and-bridge_prompt)). It is its own field, tied to
+no other capability. Reported as `bridge_prompt_max_bytes` (the cap that applies, 8192 or 16384)
+on the connection status.
+
+#### Additive field: `machine_secrets`
+
+```json
+{ "type": "hello", "machine_secrets": { "revision": 2 } }
+```
+
+The bridge manages the machine's secret store for the app: the `secret_*` frames of
+[Secrets on the machine](#secrets-on-the-machine); `revision` versions them. A bridge sends it only
+when its operator started it with `--secret-command`, so it is absent both from a bridge that
+predates it and from one whose operator did not opt in. The server sends no `secret_*` frame to a
+bridge without it and answers the app `machine_secrets_unsupported`. Reported as
+`machine_secrets: true|false` on the connection status.
 
 ### Bridge → Server: `providers_update`
 
@@ -897,7 +924,11 @@ Validation is strict, and a contradictory spec is refused with `bridge_prompt_in
 | `append` | absent or empty | **Refused.** Says it is adding something and adds nothing. |
 | `replace` | absent or empty | **Refused.** Would silently mean `off`. |
 
-Server-supplied text is capped at 8 KB. A cap with a clear refusal beats a `spawn E2BIG` at launch, which surfaces as a turn that failed for no visible reason.
+Server-supplied text is capped at 8 KB, or 16 KB for a bridge whose hello announces
+`bridge_prompt_max_bytes` of at least 16384. `AiRequestPayload::build()` refuses more than 16 KB;
+the serve process (or, with the socket in process, `BridgeStream`) refuses a text over the cap
+of the bridge the turn goes to before sending it, with `bridge_prompt_too_large` (HTTP 400 from
+`/api/request`, or a stream `error` with that code). A cap with a clear refusal beats a `spawn E2BIG` at launch, which surfaces as a turn that failed for no visible reason.
 
 **The addendum is generated from the resolved environment, not shipped as a fixed string.** If a project uses `bridge_env` to turn background work back on, an addendum still saying the capability is disabled would be lying to the model about something it can observe directly in its own tool schema. The lifecycle bullets change with the configuration; "one process per turn, nothing survives it" is stated either way, because it is true either way.
 
@@ -2052,6 +2083,73 @@ button means stay with the host.
 
 ---
 
+## Secrets on the machine
+
+Off unless the machine's operator opts in. A bridge started with `--secret-command <absolute
+path>` (env `AI_BRIDGE_SECRET_COMMAND`) announces `hello.machine_secrets`, and the app may then
+manage the machine's secret store for the person: list it, add or replace a secret, change a
+description, remove one. The store is the machine's own; the bridge runs the operator's command
+(without a shell, bridge credentials stripped from its environment, stopped after 15 s) and
+passes its answer on. A value only ever travels in: on `secret_put`, then on the command's stdin.
+No frame, answer, error or log carries it back.
+
+### Server → Bridge
+
+| Frame | Fields |
+|---|---|
+| `secret_list` | `{id}` |
+| `secret_put` | `{id, name, description?, value, replace?}` |
+| `secret_describe` | `{id, name, description}` |
+| `secret_remove` | `{id, name}` |
+
+- `name`: 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`, no
+  trailing newline (the package matches `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/`). The bridge checks
+  it again before its command runs.
+- `description`: UTF-8 text of at most 1000 characters (code points), no NUL, never starting with
+  `-` (the command takes it as an argument). Optional on `secret_put`.
+- `value` (only `secret_put`): UTF-8 text of 1 byte to 64 KiB.
+- `replace` (only `secret_put`, revision 2): `true` to overwrite an existing secret. Absent, an
+  existing name is refused with `exists`. A revision-1 bridge replaced without saying so: the
+  server never sends it `replace` (`replace_unsupported`).
+
+### Bridge → Server: `secret_result`
+
+Exactly one per request, with its `id`: `{id, ok, secrets?, replaced?, code?, error?}`.
+`secrets` (on `secret_list`) is `[{name, description|null, updated_at|null}]`; `replaced` (on a
+successful `secret_put`, revision 2) says whether an existing secret was overwritten. Codes:
+
+| Code | Meaning |
+|---|---|
+| `no_secret_tool` | The operator's command cannot be run |
+| `not_found` | No secret of that name |
+| `exists` | `secret_put` without `replace` for a name that exists |
+| `invalid_name` / `invalid_request` | The bridge or the command refused the name or the request |
+| `timeout` | The command was stopped before it finished: the result is unknown, list the secrets again before retrying |
+| `failed` | Anything else (the server maps an unknown code to this) |
+
+### The serve process and the PHP API
+
+`POST /api/secrets` (internal API, relay token) takes `{op: list|put|describe|remove, name?,
+description?, value?, replace?}`, checks it with the rules above (400 `invalid_name` /
+`invalid_request`), sends the frame and answers with the `secret_result`. Without
+`hello.machine_secrets`: 409 `machine_secrets_unsupported`; a replace to a bridge below revision 2:
+409 `replace_unsupported`; nothing is sent in either case. No answer within
+`ai-bridge.machine_secrets.timeout` (20 s): 504 `timeout`. A put, describe or remove that was sent
+and not answered (504, or the bridge dropped: 404 `not_connected`) carries `result_unknown: true`.
+
+`AiBridge::secrets()` (`Secrets\MachineSecrets`), for a `Connection` the caller already resolved
+through its own scope: `supported($connection)`, `list($connection)`,
+`put($connection, $name, $value, $description = null, $replace = false)`,
+`describe($connection, $name, $description)`, `remove($connection, $name)`. Each answers
+`{ok, ...}` and never throws for a refusal; a write whose outcome cannot be known (`timeout`,
+`unreachable`, a drop after sending) carries `result_unknown: true`.
+
+The value travels as JSON from the app's process to the serve process, then in the frame. Keep
+`AI_BRIDGE_RELAY_URL` local or https, and exclude `/api/secrets` from HTTP recorders such as
+Telescope.
+
+---
+
 ## Heartbeat
 
 Keeps the WebSocket alive and detects dead connections.
@@ -2100,7 +2198,8 @@ The server also tracks heartbeats. If no `ping` is received for 2x the heartbeat
 | `working_dir_not_allowed` | The `working_dir` is not inside a root the operator permitted with `--allow-dir` (or none were permitted). Also emitted on a turn that named NOTHING, when the directory its CLI session is remembered in has since been revoked | Operator restarts the bridge with `--allow-dir`, or the server offers only the `workspaces` from `hello`. Terminal: `done` follows |
 | `working_dir_not_found` | The named `working_dir` is inside an allowed root but does not exist, or is not a directory. The bridge never creates it | Check the path. Terminal: `done` follows |
 | `working_dir_changed` | A resume named a different directory from the one its CLI session was started in | Server starts a fresh session deliberately. Terminal: `done` follows |
-| `bridge_prompt_invalid` | The `bridge_prompt` contradicts itself — text with a mode that discards it, `append`/`replace` with nothing to add, an unknown mode, or text over the 8 KB cap | Server fixes the field. Terminal: `done` follows |
+| `bridge_prompt_invalid` | The `bridge_prompt` contradicts itself — text with a mode that discards it, `append`/`replace` with nothing to add, an unknown mode, or text over the bridge's cap (8 KB, or `hello.bridge_prompt_max_bytes`) | Server fixes the field. Terminal: `done` follows |
+| `bridge_prompt_too_large` | Not sent by a bridge: the server refused a `bridge_prompt.text` over the cap of the bridge the turn was for, before sending it | Shorten the text, or update the bridge. The turn never started |
 | `attachment_refused` | An attachment URL is not on the connected server's origin, or is not HTTPS | Server fixes the URL (or the operator sets `--api`). Terminal: `done` follows |
 | `attachment_too_large` | An attachment exceeds the per-file or per-request cap | Server sends a smaller file, or the operator raises `--attachment-max-mb` / `--attachment-total-mb`. Terminal: `done` follows |
 | `attachment_failed` | An attachment could not be downloaded, or failed its size/checksum verification | Retry. Terminal: `done` follows |
@@ -2258,6 +2357,7 @@ Treating the first `result` as terminal is what this replaces, and it was not a 
 | `upstream_status` | The complete list of upstream MCP servers, on every change |
 | `upstream_auth_required` | An upstream needs the person to sign in |
 | `upstream_auth_result` | How a sign-in ended, or why one could not start |
+| `secret_result` | Answering a `secret_*` frame (never carries a value) |
 | `error` | Request-level error (non-streaming) |
 
 ### Server → Bridge
@@ -2277,6 +2377,7 @@ Treating the first `result` as terminal is what this replaces, and it was not a 
 | `file_read` / `file_read_cancel` | Asking for a file the machine recorded |
 | `mcp_request` | A view's `resources/read` or `tools/call` for an upstream (needs `hello.mcp_apps`) |
 | `upstream_auth_start` / `upstream_auth_code` / `upstream_auth_forget` | Upstream OAuth sign-in (needs `hello.mcp_upstream_auth`) |
+| `secret_list` / `secret_put` / `secret_describe` / `secret_remove` | Manage the machine's secret store (needs `hello.machine_secrets`) |
 
 ---
 
@@ -2326,6 +2427,10 @@ The protocol version is exchanged during handshake (`hello.version`). The server
 **Images in tool results do not bump the version.** `hello.tool_result_content` and `tool_resolve.content` are additive; `content` is only sent to a bridge that announced the field, and `result` keeps meaning what it always did.
 
 **Upstream MCP Apps and sign-in do not bump the version.** `hello.mcp_upstream_auth`, `welcome.upstream_oauth`, `tool_result.ui.server`, `mcp_request` / `mcp_result` and the `upstream_*` frames are additive; a server sends none of its frames to a bridge that did not announce the matching hello field, and an older bridge ignores `welcome.upstream_oauth`.
+
+**Machine secrets do not bump the version.** `hello.machine_secrets`, the four `secret_*` frames and `secret_result` are additive; their shape is versioned by `hello.machine_secrets.revision`, and a server sends none of them to a bridge without the field.
+
+**The larger prompt cap does not bump the version.** `hello.bridge_prompt_max_bytes` is additive; a server keeps `bridge_prompt.text` within 8 KB for a bridge without it.
 
 **Workspaces, attachments and `workspace` isolation do not bump the version.** They stay on `0.1`, deliberately. Every one of them is optional in both directions — `hello.workspaces`, `ai_request.working_dir`, `ai_request.attachments`, the `attachment` stream event and the `workspace` value of `cli_isolation` are all additive, and both ends already ignore fields they do not recognise. Only the major number is enforced, so a bump would refuse every bridge already installed in exchange for nothing.
 

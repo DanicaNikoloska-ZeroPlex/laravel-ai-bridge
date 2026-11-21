@@ -443,6 +443,7 @@ class BridgeWebSocketServer
     //   POST /api/upstream/auth-start  — Ask the bridge to start an upstream OAuth sign-in
     //   POST /api/upstream/auth-code   — Pass an OAuth redirect's code on, await the result
     //   POST /api/upstream/auth-forget — Have the bridge forget an upstream's tokens
+    //   POST /api/secrets    — Manage the secret store on the user's machine, await secret_result
     //   GET  /api/status     — Check connected users
     //   GET  /api/health     — Health check
     // -------------------------------------------------------------------------
@@ -609,6 +610,7 @@ class BridgeWebSocketServer
             $method === 'POST' && $path === '/api/upstream/auth-start' => $this->apiUpstreamAuthStart($tcpConnection, $request, $decoded),
             $method === 'POST' && $path === '/api/upstream/auth-code' => $this->apiUpstreamAuthCode($tcpConnection, $request, $decoded),
             $method === 'POST' && $path === '/api/upstream/auth-forget' => $this->apiUpstreamAuthForget($tcpConnection, $request, $decoded),
+            $method === 'POST' && $path === '/api/secrets' => $this->apiSecrets($tcpConnection, $request, $decoded),
             default => $this->httpResponse($tcpConnection, 404, [
                 'error' => 'not_found',
                 'message' => "Unknown endpoint: {$method} {$path}",
@@ -1136,6 +1138,17 @@ class BridgeWebSocketServer
             return;
         }
 
+        // A bridge_prompt over what this bridge takes is refused here, before the turn starts.
+        $promptRefusal = AiRequestPayload::bridgePromptRefusal($payload, $this->connectionManager->getBridgeInfo($userId));
+        if ($promptRefusal !== null) {
+            $this->httpResponse($tcpConnection, 400, [
+                'error' => AiRequestPayload::BRIDGE_PROMPT_TOO_LARGE,
+                'message' => $promptRefusal,
+            ]);
+
+            return;
+        }
+
         // Register the relayed request as pending so incoming tool calls and
         // stream events from the bridge can be verified and buffered for the
         // browser's SSE tail. Register BEFORE sending so a fast bridge reply
@@ -1314,6 +1327,71 @@ class BridgeWebSocketServer
     }
 
     /**
+     * POST /api/secrets — Manage the secret store on the user's machine.
+     *
+     * Body `{op: list|put|describe|remove, name?, description?, value?, replace?}`, checked by
+     * Secrets\SecretRequest (400 `invalid_name` / `invalid_request`). Sends the matching
+     * `secret_*` frame with a fresh id and answers with the bridge's `secret_result`
+     * (`{ok, secrets?, replaced?, code?, error?}`). Refused without sending anything: 409
+     * `machine_secrets_unsupported` for a bridge whose hello had no `machine_secrets` (its
+     * operator did not opt in), 409 `replace_unsupported` for a replace to a bridge below
+     * revision 2. 504 `timeout` after `ai-bridge.machine_secrets.timeout` seconds; a put,
+     * describe or remove that was sent and not answered (timeout, or the bridge dropped) also
+     * carries `result_unknown: true`: list the secrets again before retrying.
+     *
+     * A put's value is never logged and never part of an answer; it lives only in this request
+     * and the frame written to the bridge.
+     */
+    private function apiSecrets(ConnectionInterface $tcpConnection, RequestInterface $request, object $decoded): void
+    {
+        $body = json_decode((string) $request->getBody(), true);
+        $frame = \Tetrix\AiBridge\Secrets\SecretRequest::frameOf(is_array($body) ? $body : []);
+
+        if (! isset($frame['type'])) {
+            $this->httpResponse($tcpConnection, 400, ['ok' => false] + $frame);
+
+            return;
+        }
+
+        $userId = $this->bridgeFor($tcpConnection, $decoded, 'machine_secrets');
+        if ($userId === null) {
+            return;
+        }
+
+        // Revision 2 refuses an existing name unless `replace` is true. An older bridge would
+        // overwrite without saying so, so it is never asked to replace.
+        $revision = $this->connectionManager->reachableBridgeInfo($userId)['machine_secrets']['revision'] ?? null;
+        if (($frame['replace'] ?? false) === true && (! is_int($revision) || $revision < 2)) {
+            $this->httpResponse($tcpConnection, 409, [
+                'ok' => false,
+                'code' => 'replace_unsupported',
+                'error' => 'Replacing a secret needs a newer bridge on this machine; remove it first, then add it again.',
+            ]);
+
+            return;
+        }
+
+        $id = 'sec-'.bin2hex(random_bytes(8));
+        $frame = ['type' => $frame['type'], 'id' => $id] + $frame;
+        $write = $frame['type'] !== MessageTypes::SECRET_LIST;
+        $unknown = $write ? ['result_unknown' => true] : [];
+
+        $this->awaitBridge($tcpConnection, $userId, \Tetrix\AiBridge\Secrets\SecretFrames::exchangeKey($userId, $id), $frame, (float) config('ai-bridge.machine_secrets.timeout', 20), [
+            'ok' => false,
+            'code' => 'timeout',
+            'error' => $write
+                ? 'The machine did not answer in time, so the result is unknown: list the secrets again before retrying.'
+                : 'The machine did not answer in time.',
+        ] + $unknown, 'machine_secrets', $write ? [
+            'ok' => false,
+            'code' => 'not_connected',
+            'error' => 'The bridge disconnected before it answered, so the result is unknown: list the secrets again before retrying.',
+            'result_unknown' => true,
+            '_status' => 404,
+        ] : null);
+    }
+
+    /**
      * The `server` of an upstream request's body, or null after answering 400.
      */
     private function upstreamServerOf(ConnectionInterface $tcpConnection, RequestInterface $request): ?string
@@ -1381,10 +1459,14 @@ class BridgeWebSocketServer
      * a short drop is not sent to a bridge that comes back without it, and every waiter is
      * answered 409 `<needs>_unsupported` at once instead.
      *
+     * `$droppedAnswer`, when given, answers a waiter whose frame was already out when the
+     * bridge dropped (default: the same `not_connected` as a frame never sent).
+     *
      * @param  array<string, mixed>  $frame
      * @param  array<string, mixed>  $timeoutAnswer
+     * @param  array<string, mixed>|null  $droppedAnswer
      */
-    private function awaitBridge(ConnectionInterface $tcpConnection, string $userId, string $key, array $frame, float $timeout, array $timeoutAnswer, ?string $needs = null): void
+    private function awaitBridge(ConnectionInterface $tcpConnection, string $userId, string $key, array $frame, float $timeout, array $timeoutAnswer, ?string $needs = null, ?array $droppedAnswer = null): void
     {
         $answered = false;
         $respond = function (array $answer) use (&$answered, $tcpConnection): void {
@@ -1404,7 +1486,7 @@ class BridgeWebSocketServer
             '_status' => 404,
         ];
 
-        $first = $this->connectionManager->registerPendingExchange($key, $userId, $respond, $goneAnswer);
+        $first = $this->connectionManager->registerPendingExchange($key, $userId, $respond, $droppedAnswer ?? $goneAnswer);
 
         // Each waiter's own clock, started with its request: below its caller's timeout
         // ($timeout + 3), so a frame held through a short drop never outlives its caller. When

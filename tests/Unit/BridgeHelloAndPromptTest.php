@@ -68,6 +68,8 @@ it('records bridge_version, attachment_limits and capabilities from a pre-authen
             'effort_levels' => [],
             'mcp_apps' => null,
             'mcp_upstream_auth' => null,
+            'machine_secrets' => null,
+            'bridge_prompt_max_bytes' => null,
         ])
         ->and($rig->manager->bridgeSupports('user-1', 'file_uploads'))->toBeTrue();
 });
@@ -103,6 +105,8 @@ it('reads an old bridge hello as no capabilities, and drops fields of the wrong 
         'effort_levels' => [],
         'mcp_apps' => null,
         'mcp_upstream_auth' => null,
+        'machine_secrets' => null,
+        'bridge_prompt_max_bytes' => null,
     ]);
 });
 
@@ -168,7 +172,7 @@ it('refuses a bridge_prompt the bridge would refuse', function (mixed $spec) {
     'text with default' => [['text' => 'x']],
     'append without text' => [['mode' => 'append']],
     'replace with empty text' => [['mode' => 'replace', 'text' => '']],
-    'too long' => [['mode' => 'append', 'text' => str_repeat('a', 8193)]],
+    'too long for any bridge' => [['mode' => 'append', 'text' => str_repeat('a', 16385)]],
     'not an object' => [42],
 ])->throws(InvalidArgumentException::class);
 

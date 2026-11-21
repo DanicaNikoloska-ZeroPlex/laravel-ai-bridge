@@ -318,7 +318,8 @@ class UpstreamClient
         }
     }
 
-    private static function internalApiBase(): string
+    /** The serve process's internal HTTP API: AI_BRIDGE_RELAY_URL, else host and port. */
+    public static function internalApiBase(): string
     {
         $relayUrl = config('ai-bridge.server.relay_url');
         if (! empty($relayUrl)) {
