@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Connections\ConnectionStatus;
+use Tetrix\AiBridge\Events\MachineSecretChanged;
 use Tetrix\AiBridge\Models\Connection;
 use Tetrix\AiBridge\Upstreams\UpstreamClient;
 
@@ -35,6 +36,10 @@ use Tetrix\AiBridge\Upstreams\UpstreamClient;
  * after it was sent) the answer also carries `result_unknown: true`: list the secrets again
  * before retrying.
  *
+ * Every put, describe and remove, whatever its outcome, fires MachineSecretChanged and writes
+ * one info log line (operation, connection, name, outcome; never a value or a description), so
+ * a host can keep an audit trail.
+ *
  * Works from any process except the serve process itself, like AiBridge::upstreams(). Takes a
  * Connection the caller already fetched through its own scope; authorising that is the
  * caller's job.
@@ -46,10 +51,23 @@ class MachineSecrets
         private readonly ConnectionStatus $status,
     ) {}
 
-    /** Whether this connection's bridge announced `machine_secrets` (see ConnectionStatus::for()). */
+    /**
+     * Whether this connection's secrets can be managed now: its bridge is connected and its
+     * hello carried `machine_secrets` at revision 2 or newer (see ConnectionStatus::for()).
+     * False while the machine is off or the serve process cannot be reached, even when the last
+     * hello had it: a bridge may come back without `--machine-secrets`. A call made then is
+     * answered at once with the reason (`not_connected`, `unreachable`,
+     * `machine_secrets_unsupported`, `machine_secrets_outdated`). Also false during a short drop
+     * of a `reliable_delivery` bridge; a call made then is held, and sent after the reconnect
+     * only if the bridge that comes back passes the same check.
+     */
     public function supported(Connection $connection): bool
     {
-        return $this->status->for($connection)['machine_secrets'] === true;
+        $status = $this->status->for($connection);
+
+        return $status['connected'] === true
+            && $status['machine_secrets'] === true
+            && SecretFrames::refusalFor(['machine_secrets' => ['revision' => $status['machine_secrets_revision']]]) === null;
     }
 
     /**
@@ -120,6 +138,22 @@ class MachineSecrets
      */
     private function call(Connection $connection, #[\SensitiveParameter] array $body): array
     {
+        $started = microtime(true);
+        $answer = $this->answer($connection, $body);
+
+        if ($body['op'] !== 'list') {
+            $this->audit($connection, $body, $answer, $started);
+        }
+
+        return $answer;
+    }
+
+    /**
+     * @param  array<string, mixed>  $body
+     * @return array<string, mixed>
+     */
+    private function answer(Connection $connection, #[\SensitiveParameter] array $body): array
+    {
         $frame = SecretRequest::frameOf($body);
         if (! isset($frame['type'])) {
             return ['ok' => false] + $frame;
@@ -146,6 +180,68 @@ class MachineSecrets
         }
 
         return $answer;
+    }
+
+    /**
+     * The audit trail of one change: MachineSecretChanged and an info log line, never the value.
+     *
+     * @param  array<string, mixed>  $body
+     * @param  array<string, mixed>  $answer
+     */
+    private function audit(Connection $connection, #[\SensitiveParameter] array $body, array $answer, float $started): void
+    {
+        $ok = ($answer['ok'] ?? false) === true;
+        $outcome = $ok ? 'ok' : (is_string($answer['code'] ?? null) ? $answer['code'] : 'failed');
+        $name = is_string($body['name'] ?? null) ? mb_substr($body['name'], 0, 128) : '';
+        $unknown = ($answer['result_unknown'] ?? null) === true;
+        $replaced = $ok && ($answer['replaced'] ?? null) === true;
+        $userId = self::authUserId();
+        $durationMs = (int) round((microtime(true) - $started) * 1000);
+
+        // Neither the log line nor a listener may cost the caller its answer: the change has
+        // already happened (or may have).
+        try {
+            Log::info('AI Bridge: machine secret '.$body['op'], [
+                'operation' => (string) $body['op'],
+                'connection_id' => $connection->id,
+                'user_id' => $userId,
+                'name' => $name,
+                'outcome' => $outcome,
+                'result_unknown' => $unknown,
+                'replaced' => $replaced,
+                'duration_ms' => $durationMs,
+            ]);
+        } catch (\Throwable) {
+            // A failing log handler is not the caller's problem.
+        }
+
+        try {
+            MachineSecretChanged::dispatch(
+                $userId,
+                (int) $connection->id,
+                (string) $body['op'],
+                $name,
+                $outcome,
+                $unknown,
+                $replaced,
+                $durationMs,
+            );
+        } catch (\Throwable $e) {
+            try {
+                Log::warning('AI Bridge: a MachineSecretChanged listener failed', ['error' => $e::class]);
+            } catch (\Throwable) {
+                // The logger failing too still costs the caller nothing.
+            }
+        }
+    }
+
+    private static function authUserId(): int|string|null
+    {
+        try {
+            return auth()->id();
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**

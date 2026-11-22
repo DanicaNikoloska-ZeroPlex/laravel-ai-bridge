@@ -22,9 +22,47 @@ final class SecretFrames
     /** The most rows one list answer is read for. */
     private const MAX_ROWS = 1000;
 
+    /** The lowest `machine_secrets.revision` sent any `secret_*` frame (revision 1 overwrote on a plain put). */
+    public const MIN_REVISION = 2;
+
     public function __construct(
         private readonly BridgeConnectionManager $connections,
     ) {}
+
+    /**
+     * Why a bridge that said this at hello must not be sent a `secret_*` frame, or null when it
+     * may: 409 `machine_secrets_unsupported` without `machine_secrets` (its operator did not opt
+     * in), 409 `machine_secrets_outdated` below revision 2 or without a revision. Checked before
+     * sending, and again for a frame held through a short drop against the bridge that came
+     * back, which may be an older one.
+     *
+     * @param  array<string, mixed>  $bridgeInfo  What the bridge said at hello (BridgeConnectionManager).
+     * @return array{ok: false, code: string, error: string, _status: int}|null
+     */
+    public static function refusalFor(array $bridgeInfo): ?array
+    {
+        $field = $bridgeInfo['machine_secrets'] ?? null;
+        if (! is_array($field)) {
+            return [
+                'ok' => false,
+                'code' => 'machine_secrets_unsupported',
+                'error' => 'This bridge does not announce machine_secrets; it needs updating, or its operator has not started it with --machine-secrets.',
+                '_status' => 409,
+            ];
+        }
+
+        $revision = $field['revision'] ?? null;
+        if (! is_int($revision) || $revision < self::MIN_REVISION) {
+            return [
+                'ok' => false,
+                'code' => 'machine_secrets_outdated',
+                'error' => 'The bridge on this machine manages secrets in an older way; update it (ai-bridge 0.46.0 or newer).',
+                '_status' => 409,
+            ];
+        }
+
+        return null;
+    }
 
     /** The key a `secret_*` exchange waits under: per bridge, so ids cannot cross users. */
     public static function exchangeKey(string $userId, string $id): string

@@ -1363,14 +1363,13 @@ class BridgeWebSocketServer
         // Revision 2 refuses an existing name unless `replace` is true. Revision 1 was an
         // unreleased draft that overwrote without saying so, and a bridge without a revision says
         // nothing about either: neither is sent any secret_* frame, so no put can overwrite
-        // silently.
-        $revision = $this->connectionManager->reachableBridgeInfo($userId)['machine_secrets']['revision'] ?? null;
-        if (! is_int($revision) || $revision < 2) {
-            $this->httpResponse($tcpConnection, 409, [
-                'ok' => false,
-                'code' => 'machine_secrets_outdated',
-                'error' => 'The bridge on this machine manages secrets in an older way; update it (ai-bridge 0.46.0 or newer).',
-            ]);
+        // silently. The same check runs again for a frame held through a short drop, against
+        // the bridge that comes back (awaitBridge()).
+        $refusal = \Tetrix\AiBridge\Secrets\SecretFrames::refusalFor($this->connectionManager->reachableBridgeInfo($userId));
+        if ($refusal !== null) {
+            $status = $refusal['_status'];
+            unset($refusal['_status']);
+            $this->httpResponse($tcpConnection, $status, $refusal);
 
             return;
         }
@@ -1392,7 +1391,7 @@ class BridgeWebSocketServer
             'error' => 'The bridge disconnected before it answered, so the result is unknown: list the secrets again before retrying.',
             'result_unknown' => true,
             '_status' => 404,
-        ] : null);
+        ] : null, \Tetrix\AiBridge\Secrets\SecretFrames::refusalFor(...));
     }
 
     /**
@@ -1466,11 +1465,16 @@ class BridgeWebSocketServer
      * `$droppedAnswer`, when given, answers a waiter whose frame was already out when the
      * bridge dropped (default: the same `not_connected` as a frame never sent).
      *
+     * `$refusal`, when given, is checked against what the bridge that comes back after a short
+     * drop said at hello: `callable(array $bridgeInfo): ?array`, the answer that refuses the
+     * held frame (with `_status`), or null to send it. For a check finer than `$needs`, such
+     * as a minimum revision; the caller ran the same check before sending.
+     *
      * @param  array<string, mixed>  $frame
      * @param  array<string, mixed>  $timeoutAnswer
      * @param  array<string, mixed>|null  $droppedAnswer
      */
-    private function awaitBridge(ConnectionInterface $tcpConnection, string $userId, string $key, array $frame, float $timeout, array $timeoutAnswer, ?string $needs = null, ?array $droppedAnswer = null): void
+    private function awaitBridge(ConnectionInterface $tcpConnection, string $userId, string $key, array $frame, float $timeout, array $timeoutAnswer, ?string $needs = null, ?array $droppedAnswer = null, ?callable $refusal = null): void
     {
         $answered = false;
         $respond = function (array $answer) use (&$answered, $tcpConnection): void {
@@ -1517,14 +1521,15 @@ class BridgeWebSocketServer
             return;
         }
 
-        $refused = $needs === null ? null : fn () => $this->connectionManager->resolvePendingExchange($key, $userId, [
+        $refused = $needs === null && $refusal === null ? null : fn (array $bridgeInfo = []) => $this->connectionManager->resolvePendingExchange($key, $userId, ($refusal === null ? null : $refusal($bridgeInfo)) ?? [
             'ok' => false,
             'code' => $needs.'_unsupported',
             'error' => 'The bridge that reconnected does not announce '.$needs.'; it needs updating.',
             '_status' => 409,
         ]);
+        $accepts = $refusal === null ? null : fn (array $bridgeInfo): bool => $refusal($bridgeInfo) === null;
 
-        if (! $this->connectionManager->sendOrHold($userId, $frame, null, $holdKey, $needs, $refused)) {
+        if (! $this->connectionManager->sendOrHold($userId, $frame, null, $holdKey, $needs, $refused, $accepts)) {
             $this->connectionManager->forgetPendingExchange($key, $respond);
             $respond(['ok' => false, 'code' => 'send_failed', 'error' => 'Could not write to the bridge.', '_status' => 502]);
         }
