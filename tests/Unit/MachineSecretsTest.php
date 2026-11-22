@@ -7,11 +7,13 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Log\Events\MessageLogged;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use React\EventLoop\StreamSelectLoop;
 use React\Socket\ConnectionInterface;
 use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Events\MachineSecretChanged;
 use Tetrix\AiBridge\Facades\AiBridge;
 use Tetrix\AiBridge\Models\Connection;
 use Tetrix\AiBridge\Protocol\AiRequestPayload;
@@ -65,7 +67,7 @@ function secretsRig(float $timeout = 5.0): object
     });
 
     $hellos = [
-        'on' => ['machine_secrets' => ['revision' => 2], 'bridge_prompt_max_bytes' => 16384],
+        'on' => ['machine_secrets' => ['revision' => 2], 'bridge_prompt_max_bytes' => 16384, 'reliable_delivery' => true],
         'r1' => ['machine_secrets' => ['revision' => 1]],
         'off' => [],
     ];
@@ -254,6 +256,45 @@ describe('POST /api/secrets', function () {
             ->and($out->responses[0]['body'])->toMatchArray(['code' => 'not_connected', 'result_unknown' => true]);
     });
 
+    it('holds a write through a short drop and sends it to a bridge that comes back on revision 2', function () {
+        $rig = secretsRig();
+        $rig->manager->removeConnection('key-on', 'websocket_closed');
+
+        $out = secretsPost($rig, '/api/secrets', ['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE]);
+        expect($rig->sent)->toBe([])->and($out->responses)->toBe([]);
+
+        $rig->manager->addConnection('key-on', 'conn-on2', 'socket-on2');
+        $rig->handler->handleMessage('conn-on2', null, json_encode(['type' => 'hello', 'version' => '0.1', 'providers' => [], 'machine_secrets' => ['revision' => 2], 'reliable_delivery' => true]));
+        $rig->manager->reattachRunningTurns('key-on', []);
+        $rig->manager->flushHeldFrames('key-on');
+
+        expect($rig->sent)->toHaveCount(1)
+            ->and($rig->sent[0]['type'])->toBe(MessageTypes::SECRET_PUT);
+    });
+
+    it('does not send a held write to an older bridge that took the machine\'s place: 409, nothing sent', function (array $comeback, string $code) {
+        $rig = secretsRig();
+        $rig->manager->removeConnection('key-on', 'websocket_closed');
+
+        $out = secretsPost($rig, '/api/secrets', ['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE, 'replace' => true]);
+
+        $rig->manager->addConnection('key-on', 'conn-on2', 'socket-on2');
+        $rig->handler->handleMessage('conn-on2', null, json_encode(['type' => 'hello', 'version' => '0.1', 'providers' => [], 'reliable_delivery' => true] + $comeback));
+        $rig->manager->reattachRunningTurns('key-on', []);
+        $rig->manager->flushHeldFrames('key-on');
+
+        expect($rig->sent)->toBe([])
+            ->and($out->responses)->toHaveCount(1)
+            ->and($out->responses[0]['status'])->toBe(409)
+            ->and($out->responses[0]['body']['code'])->toBe($code)
+            ->and($out->responses[0]['body'])->not->toHaveKey('result_unknown')
+            ->and($out->responses[0]['raw'])->not->toContain(SECRET_VALUE);
+    })->with([
+        'revision 1' => [['machine_secrets' => ['revision' => 1]], 'machine_secrets_outdated'],
+        'no revision' => [['machine_secrets' => []], 'machine_secrets_outdated'],
+        'secrets off' => [[], 'machine_secrets_unsupported'],
+    ]);
+
     it('does not let one bridge answer another\'s request', function () {
         $rig = secretsRig();
 
@@ -321,6 +362,67 @@ describe('SecretRequest', function () {
 describe('AiBridge::secrets()', function () {
     beforeEach(function () {
         $this->connection = Connection::create(['type' => Connection::TYPE_BRIDGE, 'connection_key' => 'key-on', 'name' => 'laptop']);
+    });
+
+    it('is supported only while the bridge is connected and announced revision 2 or newer', function (array $status, ?array $lastBridge, bool $supported) {
+        Http::fake(['*/api/status' => Http::response($status)]);
+        $this->connection->forceFill(['last_bridge' => $lastBridge])->save();
+
+        expect(AiBridge::secrets()->supported($this->connection))->toBe($supported);
+    })->with([
+        'connected, revision 2' => [['connected' => true, 'providers' => [], 'bridge' => ['machine_secrets' => ['revision' => 2]]], null, true],
+        'connected, newer revision' => [['connected' => true, 'providers' => [], 'bridge' => ['machine_secrets' => ['revision' => 3]]], null, true],
+        'connected, restarted without --machine-secrets' => [['connected' => true, 'providers' => [], 'bridge' => ['machine_secrets' => null]], ['machine_secrets' => ['revision' => 2]], false],
+        'connected, revision 1' => [['connected' => true, 'providers' => [], 'bridge' => ['machine_secrets' => ['revision' => 1]]], null, false],
+        'connected, no revision' => [['connected' => true, 'providers' => [], 'bridge' => ['machine_secrets' => ['revision' => null]]], null, false],
+        'off, remembered from the last hello' => [['connected' => false], ['machine_secrets' => ['revision' => 2]], false],
+    ]);
+
+    it('is not supported when the serve process cannot be reached, whatever was remembered', function () {
+        Http::fake(['*/api/status' => Http::response('', 500)]);
+        $this->connection->forceFill(['last_bridge' => ['machine_secrets' => ['revision' => 2]]])->save();
+
+        expect(AiBridge::secrets()->supported($this->connection))->toBeFalse();
+    });
+
+    it('fires MachineSecretChanged and logs a line for every change, never the value or the description', function () {
+        Http::fake(['*/api/secrets' => Http::sequence()
+            ->push(['ok' => true, 'replaced' => true])
+            ->push(['ok' => false, 'code' => 'not_found', 'error' => 'No secret named stripe.'])
+            ->push(['ok' => false, 'code' => 'timeout', 'error' => 'The machine did not answer in time.'], 504)
+            ->push(['ok' => true, 'secrets' => []])]);
+        $events = [];
+        Event::listen(MachineSecretChanged::class, function (MachineSecretChanged $e) use (&$events) {
+            $events[] = [$e->operation, $e->name, $e->outcome, $e->resultUnknown, $e->replaced, $e->connectionId, $e->userId];
+        });
+        $logs = [];
+        Log::listen(function (MessageLogged $e) use (&$logs) {
+            $logs[] = $e->message.' '.json_encode($e->context);
+        });
+
+        AiBridge::secrets()->put($this->connection, 'stripe', SECRET_VALUE, 'Private description', replace: true);
+        AiBridge::secrets()->remove($this->connection, 'stripe');
+        AiBridge::secrets()->describe($this->connection, 'stripe', 'Private description');
+        AiBridge::secrets()->list($this->connection);
+        AiBridge::secrets()->remove($this->connection, 'a/b');
+
+        $id = (int) $this->connection->id;
+        expect($events)->toBe([
+            ['put', 'stripe', 'ok', false, true, $id, null],
+            ['remove', 'stripe', 'not_found', false, false, $id, null],
+            ['describe', 'stripe', 'timeout', true, false, $id, null],
+            ['remove', 'a/b', 'invalid_name', false, false, $id, null],
+        ])
+            ->and(array_values(array_filter($logs, fn ($l) => str_starts_with($l, 'AI Bridge: machine secret '))))->toHaveCount(4)
+            ->and(implode("\n", $logs))->not->toContain(SECRET_VALUE)
+            ->and(implode("\n", $logs))->not->toContain('Private description');
+    });
+
+    it('still answers when a MachineSecretChanged listener throws', function () {
+        Http::fake(['*/api/secrets' => Http::response(['ok' => true])]);
+        Event::listen(MachineSecretChanged::class, fn () => throw new RuntimeException('listener broke'));
+
+        expect(AiBridge::secrets()->remove($this->connection, 'stripe'))->toBe(['ok' => true]);
     });
 
     it('posts the operation to /api/secrets as the connection and returns the answer', function () {

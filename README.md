@@ -1362,9 +1362,22 @@ if ($secrets->supported($connection)) {
   body: with Telescope, call `Telescope::hideRequestParameters(['value'])` in your
   `TelescopeServiceProvider`, and keep other outgoing-request loggers away from `/api/secrets`.
   The package never logs it.
-- `supported()` reads what the bridge announced when it last connected, so it can be true while
-  the machine is off: check the connection's `connected` too before offering the feature.
-- `ConnectionStatus::for()` and `GET /ai-bridge/connections` report `machine_secrets`.
+- `supported()` is true only while the bridge is connected and announced `machine_secrets` at
+  revision 2 or newer (from 0.27.1; before, it read the last hello and could be true while the
+  machine was off or had restarted without `--machine-secrets`). False also when the serve
+  process cannot be reached, and during a short drop; a call made then is answered with the
+  reason, never sent to the wrong bridge. A write held through a short drop is sent only if the
+  bridge that comes back still announces revision 2 or newer; otherwise it is answered 409
+  (`machine_secrets_unsupported` or `machine_secrets_outdated`) and nothing is sent.
+- **Audit trail.** Every `put()`, `describe()` and `remove()`, whatever its outcome, fires
+  `Tetrix\AiBridge\Events\MachineSecretChanged` (user, connection, operation, name, outcome,
+  `resultUnknown`, `replaced`, duration) and writes one info log line `AI Bridge: machine secret
+  <op>` with the same fields. Neither carries the value or the description. Fired in the process
+  that called `AiBridge::secrets()`, with `auth()->id()` there (null in a job or command); listen
+  to it to keep your own record of who changed which machine's secrets.
+- `ConnectionStatus::for()` and `GET /ai-bridge/connections` report `machine_secrets` (as the
+  last hello said, kept while the machine is off, like `capabilities`); `ConnectionStatus::for()`
+  also reports `machine_secrets_revision`.
   `ai-bridge.machine_secrets.timeout` (`AI_BRIDGE_MACHINE_SECRETS_TIMEOUT`, 20 s) is how long
   the serve process waits.
 

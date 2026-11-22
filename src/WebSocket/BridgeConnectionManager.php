@@ -399,19 +399,24 @@ class BridgeConnectionManager
      * dropped unsent and `$onRefused` runs, so its waiter is failed at once (PROTOCOL.md,
      * "Short drops").
      *
+     * `$accepts`, when given, is a finer check of the same kind (a minimum revision): it gets
+     * what the bridge that came back said at hello, and a held frame it answers false for is
+     * refused the same way. `$onRefused` gets that hello too.
+     *
      * @param  array<string, mixed>  $frame
      * @param  (callable(): void)|null  $onSent
-     * @param  (callable(): void)|null  $onRefused
+     * @param  (callable(array<string, mixed>): void)|null  $onRefused
+     * @param  (callable(array<string, mixed>): bool)|null  $accepts
      * @return bool  False only when the machine is neither connected nor waited for, or the
      *               write failed.
      */
-    public function sendOrHold(int|string $userId, array $frame, ?callable $onSent = null, ?string $key = null, ?string $requires = null, ?callable $onRefused = null): bool
+    public function sendOrHold(int|string $userId, array $frame, ?callable $onSent = null, ?string $key = null, ?string $requires = null, ?callable $onRefused = null, ?callable $accepts = null): bool
     {
         $userId = (string) $userId;
 
         if (isset($this->awaitingReconnect[$userId])) {
             $this->heldFrames[$userId][$key ?? 'held:'.(++$this->heldSequence)] = [
-                'frame' => $frame, 'on_sent' => $onSent, 'requires' => $requires, 'on_refused' => $onRefused,
+                'frame' => $frame, 'on_sent' => $onSent, 'requires' => $requires, 'on_refused' => $onRefused, 'accepts' => $accepts,
             ];
 
             return true;
@@ -454,7 +459,9 @@ class BridgeConnectionManager
             }
 
             $requires = $held['requires'] ?? null;
-            if ($requires !== null && ! $this->bridgeHas($userId, $requires)) {
+            $accepts = $held['accepts'] ?? null;
+            if (($requires !== null && ! $this->bridgeHas($userId, $requires))
+                || ($accepts !== null && ! $accepts($this->getBridgeInfo($userId)))) {
                 unset($this->heldFrames[$userId][$key]);
                 Log::info('AI Bridge: a held frame is not sent: the bridge that reconnected does not support it', [
                     'user_id' => $userId,
@@ -464,7 +471,7 @@ class BridgeConnectionManager
 
                 if (($held['on_refused'] ?? null) !== null) {
                     try {
-                        ($held['on_refused'])();
+                        ($held['on_refused'])($this->getBridgeInfo($userId));
                     } catch (\Throwable $e) {
                         Log::warning('AI Bridge: a refused held frame\'s callback failed', ['error' => $e->getMessage()]);
                     }

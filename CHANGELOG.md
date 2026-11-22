@@ -3,6 +3,35 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## Unreleased — to be released as 0.27.1
+
+### Added
+
+- **An audit trail of changes to a machine's secrets.** Every `AiBridge::secrets()->put()`,
+  `describe()` and `remove()`, whatever its outcome, fires `Events\MachineSecretChanged` (user,
+  connection, operation, name, outcome, `resultUnknown`, `replaced`, duration) and writes one info
+  log line `AI Bridge: machine secret <op>` with the same fields; never the value or the
+  description. Listen to it to keep a record of who changed which machine's secrets.
+- `ConnectionStatus::for()` reports `machine_secrets_revision` (int or null).
+
+### Fixed
+
+- **A write held through a short drop is re-checked against the bridge that comes back.** A
+  `secret_*` frame held while a `reliable_delivery` bridge was away went to the bridge that
+  reconnected as long as it announced `machine_secrets` at all, even below revision 2 (whose plain
+  put overwrites). It is now sent only to a bridge at revision 2 or newer; otherwise it is dropped
+  unsent and the caller gets 409 `machine_secrets_outdated` (or `machine_secrets_unsupported`).
+  `BridgeConnectionManager::sendOrHold()` takes an optional `$accepts` check for this, and
+  `$onRefused` now gets the hello of the bridge that came back.
+- **`AiBridge::secrets()->supported()` is true only while the secrets can be managed:** the bridge
+  is connected and announced `machine_secrets` at revision 2 or newer. It read the last hello, so
+  it was true while the machine was off (even when it would come back without
+  `--machine-secrets`), when the serve process could not be reached, and for a revision 1 bridge
+  that is sent nothing. `machine_secrets` in the connection status keeps its meaning (what the last
+  hello said, kept while the machine is off).
+
+No wire change; protocol stays 0.1.
+
 ## [0.27.0] — 2026-11-21
 
 ### Added

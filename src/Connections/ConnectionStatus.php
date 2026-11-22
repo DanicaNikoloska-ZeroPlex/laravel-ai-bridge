@@ -84,7 +84,12 @@ class ConnectionStatus
      * auth, state, tools, error}`. Both kept while the machine is off, like
      * `capabilities`; check `connected`.
      *
-     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>, mcp_apps: bool, mcp_upstream_auth: bool, machine_secrets: bool, bridge_prompt_max_bytes: int, upstream_status: list<array<string, mixed>>, effort_levels: list<string>}
+     * `machine_secrets` is whether the last hello carried `machine_secrets` (its operator started
+     * the bridge with `--machine-secrets`), and `machine_secrets_revision` its revision, or null.
+     * Both kept while the machine is off, like `capabilities`. Whether secrets can be managed
+     * now is AiBridge::secrets()->supported(): connected, and revision 2 or newer.
+     *
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>, mcp_apps: bool, mcp_upstream_auth: bool, machine_secrets: bool, machine_secrets_revision: int|null, bridge_prompt_max_bytes: int, upstream_status: list<array<string, mixed>>, effort_levels: list<string>}
      */
     public function for(Connection $connection): array
     {
@@ -146,7 +151,7 @@ class ConnectionStatus
      * `self_update` is only ever true while connected (see for()).
      *
      * @param  mixed  $bridge
-     * @return array{bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>, mcp_apps: bool, mcp_upstream_auth: bool, machine_secrets: bool, bridge_prompt_max_bytes: int, upstream_status: list<array<string, mixed>>, effort_levels: list<string>}
+     * @return array{bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>, mcp_apps: bool, mcp_upstream_auth: bool, machine_secrets: bool, machine_secrets_revision: int|null, bridge_prompt_max_bytes: int, upstream_status: list<array<string, mixed>>, effort_levels: list<string>}
      */
     private static function bridgeFields(mixed $bridge, bool $connected): array
     {
@@ -165,6 +170,7 @@ class ConnectionStatus
             'mcp_apps' => is_array($bridge['mcp_apps'] ?? null) && is_string($bridge['mcp_apps']['spec'] ?? null) && $bridge['mcp_apps']['spec'] !== '',
             'mcp_upstream_auth' => is_array($bridge['mcp_upstream_auth'] ?? null),
             'machine_secrets' => is_array($bridge['machine_secrets'] ?? null),
+            'machine_secrets_revision' => is_int($bridge['machine_secrets']['revision'] ?? null) ? $bridge['machine_secrets']['revision'] : null,
             'bridge_prompt_max_bytes' => \Tetrix\AiBridge\Protocol\AiRequestPayload::bridgePromptCap($bridge),
             'upstream_status' => is_array($bridge['upstream_status'] ?? null) ? array_values(array_filter($bridge['upstream_status'], 'is_array')) : [],
         ];
@@ -180,7 +186,7 @@ class ConnectionStatus
      * Query the bridge server for a bridge connection's live status, refreshing the cached
      * capabilities. Falls back to cached providers + connected=false when unreachable.
      *
-     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>, mcp_apps: bool, mcp_upstream_auth: bool, machine_secrets: bool, bridge_prompt_max_bytes: int, upstream_status: list<array<string, mixed>>, effort_levels: list<string>}
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>, mcp_apps: bool, mcp_upstream_auth: bool, machine_secrets: bool, machine_secrets_revision: int|null, bridge_prompt_max_bytes: int, upstream_status: list<array<string, mixed>>, effort_levels: list<string>}
      */
     private function bridgeLiveStatus(Connection $connection): array
     {
