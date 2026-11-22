@@ -227,7 +227,11 @@ class MachineSecrets
                 $durationMs,
             );
         } catch (\Throwable $e) {
-            Log::warning('AI Bridge: a MachineSecretChanged listener failed', ['error' => $e::class]);
+            try {
+                Log::warning('AI Bridge: a MachineSecretChanged listener failed', ['error' => $e::class]);
+            } catch (\Throwable) {
+                // The logger failing too still costs the caller nothing.
+            }
         }
     }
 
