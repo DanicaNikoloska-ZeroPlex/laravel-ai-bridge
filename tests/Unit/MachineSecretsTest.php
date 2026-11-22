@@ -414,6 +414,7 @@ describe('AiBridge::secrets()', function () {
             ['remove', 'a/b', 'invalid_name', false, false, $id, null],
         ])
             ->and(array_values(array_filter($logs, fn ($l) => str_starts_with($l, 'AI Bridge: machine secret '))))->toHaveCount(4)
+            ->and($logs[0])->toContain('"operation":"put"')->toContain('"name":"stripe"')->toContain('"duration_ms":')
             ->and(implode("\n", $logs))->not->toContain(SECRET_VALUE)
             ->and(implode("\n", $logs))->not->toContain('Private description');
     });

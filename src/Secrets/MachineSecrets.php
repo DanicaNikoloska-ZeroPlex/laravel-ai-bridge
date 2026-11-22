@@ -55,9 +55,11 @@ class MachineSecrets
      * Whether this connection's secrets can be managed now: its bridge is connected and its
      * hello carried `machine_secrets` at revision 2 or newer (see ConnectionStatus::for()).
      * False while the machine is off or the serve process cannot be reached, even when the last
-     * hello had it: a bridge may come back without `--machine-secrets`. A call made while it
-     * is false is refused with the reason (`not_connected`, `machine_secrets_unsupported`,
-     * `machine_secrets_outdated`), never sent.
+     * hello had it: a bridge may come back without `--machine-secrets`. A call made then is
+     * answered at once with the reason (`not_connected`, `unreachable`,
+     * `machine_secrets_unsupported`, `machine_secrets_outdated`). Also false during a short drop
+     * of a `reliable_delivery` bridge; a call made then is held, and sent after the reconnect
+     * only if the bridge that comes back passes the same check.
      */
     public function supported(Connection $connection): bool
     {
@@ -194,15 +196,24 @@ class MachineSecrets
         $unknown = ($answer['result_unknown'] ?? null) === true;
         $replaced = $ok && ($answer['replaced'] ?? null) === true;
         $userId = self::authUserId();
+        $durationMs = (int) round((microtime(true) - $started) * 1000);
 
-        Log::info('AI Bridge: machine secret '.$body['op'], [
-            'connection_id' => $connection->id,
-            'user_id' => $userId,
-            'name' => $name,
-            'outcome' => $outcome,
-            'result_unknown' => $unknown,
-            'replaced' => $replaced,
-        ]);
+        // Neither the log line nor a listener may cost the caller its answer: the change has
+        // already happened (or may have).
+        try {
+            Log::info('AI Bridge: machine secret '.$body['op'], [
+                'operation' => (string) $body['op'],
+                'connection_id' => $connection->id,
+                'user_id' => $userId,
+                'name' => $name,
+                'outcome' => $outcome,
+                'result_unknown' => $unknown,
+                'replaced' => $replaced,
+                'duration_ms' => $durationMs,
+            ]);
+        } catch (\Throwable) {
+            // A failing log handler is not the caller's problem.
+        }
 
         try {
             MachineSecretChanged::dispatch(
@@ -213,7 +224,7 @@ class MachineSecrets
                 $outcome,
                 $unknown,
                 $replaced,
-                (int) round((microtime(true) - $started) * 1000),
+                $durationMs,
             );
         } catch (\Throwable $e) {
             Log::warning('AI Bridge: a MachineSecretChanged listener failed', ['error' => $e::class]);

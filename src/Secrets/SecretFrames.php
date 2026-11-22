@@ -22,12 +22,12 @@ final class SecretFrames
     /** The most rows one list answer is read for. */
     private const MAX_ROWS = 1000;
 
+    /** The lowest `machine_secrets.revision` sent any `secret_*` frame (revision 1 overwrote on a plain put). */
+    public const MIN_REVISION = 2;
+
     public function __construct(
         private readonly BridgeConnectionManager $connections,
     ) {}
-
-    /** The lowest `machine_secrets.revision` sent any `secret_*` frame (revision 1 overwrote on a plain put). */
-    public const MIN_REVISION = 2;
 
     /**
      * Why a bridge that said this at hello must not be sent a `secret_*` frame, or null when it

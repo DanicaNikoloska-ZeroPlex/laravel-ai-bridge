@@ -1365,14 +1365,16 @@ if ($secrets->supported($connection)) {
 - `supported()` is true only while the bridge is connected and announced `machine_secrets` at
   revision 2 or newer (from 0.27.1; before, it read the last hello and could be true while the
   machine was off or had restarted without `--machine-secrets`). False also when the serve
-  process cannot be reached, and during a short drop; a call made then is answered with the
-  reason, never sent to the wrong bridge. A write held through a short drop is sent only if the
-  bridge that comes back still announces revision 2 or newer; otherwise it is answered 409
-  (`machine_secrets_unsupported` or `machine_secrets_outdated`) and nothing is sent.
+  process cannot be reached; a call made while the machine is off or unreachable is answered at
+  once with the reason. It is false during a short drop of a `reliable_delivery` bridge too, but
+  a call made then is held: it is sent after the reconnect only if the bridge that comes back
+  still announces revision 2 or newer, and otherwise answered 409
+  (`machine_secrets_unsupported` or `machine_secrets_outdated`) with nothing sent.
 - **Audit trail.** Every `put()`, `describe()` and `remove()`, whatever its outcome, fires
   `Tetrix\AiBridge\Events\MachineSecretChanged` (user, connection, operation, name, outcome,
   `resultUnknown`, `replaced`, duration) and writes one info log line `AI Bridge: machine secret
-  <op>` with the same fields. Neither carries the value or the description. Fired in the process
+  <op>` with the same fields (`operation`, `connection_id`, `user_id`, `name`, `outcome`,
+  `result_unknown`, `replaced`, `duration_ms`). Neither carries the value or the description. Fired in the process
   that called `AiBridge::secrets()`, with `auth()->id()` there (null in a job or command); listen
   to it to keep your own record of who changed which machine's secrets.
 - `ConnectionStatus::for()` and `GET /ai-bridge/connections` report `machine_secrets` (as the
