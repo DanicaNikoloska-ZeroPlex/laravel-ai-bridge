@@ -459,7 +459,7 @@ class MessageHandler
                 }
             }
 
-            if (is_string($limit['account'] ?? null) && preg_match('/^[A-Za-z0-9_-]{1,100}$/', $limit['account']) === 1) {
+            if (is_string($limit['account'] ?? null) && preg_match('/^[A-Za-z0-9_-]{1,100}\z/', $limit['account']) === 1) {
                 $row['account'] = $limit['account'];
             }
 

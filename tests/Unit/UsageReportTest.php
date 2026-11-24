@@ -138,7 +138,7 @@ it('drops a malformed count or account rather than passing it on', function () {
 
     $answer = deliverUsage($manager, [
         'ok' => true,
-        'limits' => [['label' => 'GitHub API', 'percent' => 85, 'remaining' => '750', 'limit' => -1, 'account' => 'not a login<script>']],
+        'limits' => [['label' => 'GitHub API', 'percent' => 85, 'remaining' => '750', 'limit' => -1, 'account' => "some-login\n"]],
     ]);
 
     expect($answer['limits'][0])->toBe(['label' => 'GitHub API', 'percent' => 85]);
